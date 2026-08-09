@@ -1,837 +1,981 @@
 const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
-const passport = require("passport");
-const crypto = require("crypto");
 const Payment = require("../modules/PaymentSchema");
 const Order = require("../modules/OrderSchema");
 const User = require("../modules/UserSchema");
+const passport = require("passport");
+const crypto = require("crypto");
 
 // ==============================
-// MIDDLEWARE
+// 💳 PAYMENT ROUTES (Protected - User)
 // ==============================
 
-const authorizeAdmin = (req, res, next) => {
+
+
+
+
+// 📥 GET USER PAYMENTS
+router.get("/", passport.authenticate("jwt", { session: false }), async (req, res) => {
     try {
-        if (!req.user) {
-            return res.status(401).json({ 
-                success: false, 
-                message: "Authentication required" 
-            });
-        }
-        
-        if (req.user.role !== "admin") {
-            return res.status(403).json({ 
-                success: false, 
-                message: "Admin access required" 
-            });
-        }
-        
-        next();
+        const { page = 1, limit = 20, status, sort = "-createdAt" } = req.query;
+        const pageNum = parseInt(page);
+        const limitNum = parseInt(limit);
+        const skip = (pageNum - 1) * limitNum;
+
+        const filter = { user: req.user._id };
+        if (status) filter.status = status;
+
+        const payments = await Payment.find(filter)
+            .populate("order", "orderId totalPrice status")
+            .sort(sort)
+            .skip(skip)
+            .limit(limitNum);
+
+        const total = await Payment.countDocuments(filter);
+
+        res.json({
+            success: true,
+            data: payments,
+            pagination: {
+                page: pageNum,
+                limit: limitNum,
+                total,
+                pages: Math.ceil(total / limitNum)
+            }
+        });
+
     } catch (error) {
-        res.status(500).json({ 
-            success: false, 
-            message: "Server error during authorization" 
+        res.status(500).json({
+            success: false,
+            message: error.message
         });
     }
-};
-
-module.exports = authorizeAdmin;
-// ==============================
-// HELPER FUNCTIONS
-// ==============================
-
-// Generate unique transaction ID
-const generateTransactionId = () => {
-	const prefix = "TXN";
-	const timestamp = Date.now().toString().slice(-8);
-	const random = Math.floor(Math.random() * 10000).toString().padStart(4, "0");
-	return `${prefix}${timestamp}${random}`;
-};
-
-// Generate invoice ID
-const generateInvoiceId = () => {
-	const prefix = "INV";
-	const timestamp = Date.now().toString().slice(-8);
-	const random = Math.floor(Math.random() * 1000).toString().padStart(3, "0");
-	return `${prefix}${timestamp}${random}`;
-};
-
-// Simulate payment gateway processing (for demo)
-const processPaymentGateway = async (paymentDetails) => {
-	// In production, integrate with actual payment gateway like Razorpay, Stripe, etc.
-	return new Promise((resolve) => {
-		setTimeout(() => {
-			const success = Math.random() > 0.1; // 90% success rate for demo
-			if (success) {
-				resolve({
-					success: true,
-					transactionId: generateTransactionId(),
-					paymentIntentId: `pi_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-					gatewayResponse: {
-						status: "success",
-						message: "Payment processed successfully"
-					}
-				});
-			} else {
-				resolve({
-					success: false,
-					failureReason: "Payment gateway error",
-					gatewayResponse: {
-						status: "failed",
-						message: "Payment processing failed"
-					}
-				});
-			}
-		}, 1000);
-	});
-};
-
-// ==============================
-// 📋 USER ROUTES (Authenticated users only)
-// ==============================
-
-// Get user's payment history
-router.get("/my-payments", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		const {
-			page = 1,
-			limit = 10,
-			sort = "-createdAt",
-			status,
-			method
-		} = req.query;
-
-		const query = { user: userId };
-		if (status) query.status = status;
-		if (method) query.method = method;
-
-		const payments = await Payment.find(query)
-			.populate("order", "orderId status totalPrice shippingAddress")
-			.sort(sort)
-			.limit(limit * 1)
-			.skip((page - 1) * limit)
-			.lean();
-
-		const total = await Payment.countDocuments(query);
-
-		res.json({
-			success: true,
-			data: {
-				payments,
-				pagination: {
-					page: parseInt(page),
-					limit: parseInt(limit),
-					total,
-					pages: Math.ceil(total / limit)
-				}
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
 });
 
-// Get single payment by ID
-router.get("/:paymentId", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { paymentId } = req.params;
-		const userId = req.user._id;
-		const userRole = req.user.role;
+// 📄 GET SINGLE PAYMENT
+router.get("/:id", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const payment = await Payment.findById(req.params.id)
+            .populate("order", "orderId totalPrice status items")
+            .populate("user", "name email");
 
-		let query = { _id: paymentId };
-		if (userRole !== "admin") {
-			query.user = userId;
-		}
+        if (!payment) {
+            return res.status(404).json({
+                success: false,
+                message: "Payment not found"
+            });
+        }
 
-		const payment = await Payment.findOne(query)
-			.populate("order", "orderId status totalPrice shippingAddress items")
-			.populate("user", "name email phone")
-			.lean();
+        // Check if user owns the payment or is admin
+        if (payment.user._id.toString() !== req.user._id.toString() && req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "You can only view your own payments"
+            });
+        }
 
-		if (!payment) {
-			return res.status(404).json({ success: false, message: "Payment not found" });
-		}
+        res.json({
+            success: true,
+            data: payment
+        });
 
-		res.json({ success: true, data: payment });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Get payment by transaction ID
-router.get("/transaction/:transactionId", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { transactionId } = req.params;
-		const userId = req.user._id;
-		const userRole = req.user.role;
+// 💰 CREATE PAYMENT
+router.post("/create", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const {
+            orderId,
+            amount,
+            method,
+            provider = "NONE",
+            gatewayResponse
+        } = req.body;
 
-		let query = { transactionId };
-		if (userRole !== "admin") {
-			query.user = userId;
-		}
+        // Validation
+        if (!orderId || !amount || !method) {
+            return res.status(400).json({
+                success: false,
+                message: "Order ID, amount, and payment method are required"
+            });
+        }
 
-		const payment = await Payment.findOne(query)
-			.populate("order", "orderId status totalPrice")
-			.lean();
+        // Check order exists and belongs to user
+        const order = await Order.findOne({
+            _id: orderId,
+            user: req.user._id
+        });
 
-		if (!payment) {
-			return res.status(404).json({ success: false, message: "Payment not found" });
-		}
+        if (!order) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found"
+            });
+        }
 
-		res.json({ success: true, data: payment });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        // Check if payment already exists for this order
+        const existingPayment = await Payment.findOne({ order: orderId });
+        if (existingPayment) {
+            return res.status(400).json({
+                success: false,
+                message: "Payment already exists for this order"
+            });
+        }
+
+        // Generate transaction ID
+        const transactionId = "TXN-" + Date.now().toString().slice(-8) + "-" + 
+                             crypto.randomBytes(4).toString("hex").toUpperCase();
+
+        // Create payment
+        const payment = await Payment.create({
+            order: orderId,
+            user: req.user._id,
+            amount: parseFloat(amount),
+            method,
+            provider: provider || "NONE",
+            transactionId,
+            status: method === "COD" ? "pending" : "processing",
+            gatewayResponse: gatewayResponse || {},
+            notes: req.body.notes || ""
+        });
+
+        // Update order with payment reference
+        order.payment.transactionId = transactionId;
+        order.payment.status = method === "COD" ? "pending" : "pending";
+        await order.save();
+
+        res.status(201).json({
+            success: true,
+            message: "Payment created successfully",
+            data: payment
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Create new payment for an order
-router.post("/create/:orderId", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { orderId } = req.params;
-		const userId = req.user._id;
-		const { method, provider, paymentDetails } = req.body;
+// 💳 PROCESS PAYMENT
+router.post("/:id/process", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const payment = await Payment.findById(req.params.id)
+            .populate("order", "orderId totalPrice");
 
-		// Validate required fields
-		if (!method) {
-			return res.status(400).json({ success: false, message: "Payment method is required" });
-		}
+        if (!payment) {
+            return res.status(404).json({
+                success: false,
+                message: "Payment not found"
+            });
+        }
 
-		// Find the order
-		const order = await Order.findOne({ _id: orderId, user: userId });
+        // Check if user owns the payment
+        if (payment.user.toString() !== req.user._id.toString()) {
+            return res.status(403).json({
+                success: false,
+                message: "You can only process your own payments"
+            });
+        }
 
-		if (!order) {
-			return res.status(404).json({ success: false, message: "Order not found" });
-		}
+        // Check payment status
+        if (payment.status !== "pending" && payment.status !== "processing") {
+            return res.status(400).json({
+                success: false,
+                message: `Payment cannot be processed. Current status: ${payment.status}`
+            });
+        }
 
-		// Check if payment already exists for this order
-		const existingPayment = await Payment.findOne({ order: orderId });
-		if (existingPayment && existingPayment.status === "success") {
-			return res.status(400).json({ success: false, message: "Payment already completed for this order" });
-		}
+        // Simulate payment processing
+        // In production, integrate with payment gateway (Razorpay, Stripe, etc.)
+        const isSuccess = Math.random() > 0.1; // 90% success rate for demo
 
-		// Calculate payment amount
-		const amount = order.totalPrice + (order.shippingCharge || 0) - (order.coupon?.discountAmount || 0);
+        if (isSuccess) {
+            payment.status = "success";
+            payment.paidAt = new Date();
+            payment.isVerified = true;
+            
+            // Update order payment status
+            await Order.findByIdAndUpdate(payment.order, {
+                "payment.status": "paid",
+                "payment.paidAt": new Date(),
+                isPaid: true
+            });
 
-		// Create payment record
-		const payment = new Payment({
-			order: orderId,
-			user: userId,
-			amount,
-			method,
-			provider: provider || "NONE",
-			transactionId: generateTransactionId(),
-			invoiceId: generateInvoiceId(),
-			status: "pending",
-			notes: paymentDetails?.notes || ""
-		});
+            await payment.save();
 
-		await payment.save();
+            res.json({
+                success: true,
+                message: "Payment processed successfully",
+                data: payment
+            });
+        } else {
+            payment.status = "failed";
+            payment.failureReason = "Payment gateway error (demo simulation)";
+            await payment.save();
 
-		// If payment method is COD, mark as success immediately
-		if (method === "COD") {
-			payment.status = "success";
-			payment.isVerified = true;
-			payment.paidAt = new Date();
-			await payment.save();
+            // Update order payment status
+            await Order.findByIdAndUpdate(payment.order, {
+                "payment.status": "failed"
+            });
 
-			// Update order payment status
-			order.payment.status = "pending";
-			order.payment.method = "COD";
-			await order.save();
+            res.status(400).json({
+                success: false,
+                message: "Payment processing failed",
+                data: payment
+            });
+        }
 
-			return res.status(201).json({
-				success: true,
-				message: "COD payment created successfully",
-				data: payment
-			});
-		}
-
-		// For online payments, process through gateway
-		const gatewayResult = await processPaymentGateway({
-			amount,
-			method,
-			provider,
-			orderId: order.orderId,
-			...paymentDetails
-		});
-
-		if (gatewayResult.success) {
-			payment.status = "success";
-			payment.isVerified = true;
-			payment.paidAt = new Date();
-			payment.transactionId = gatewayResult.transactionId || payment.transactionId;
-			payment.paymentIntentId = gatewayResult.paymentIntentId;
-			payment.gatewayResponse = gatewayResult.gatewayResponse;
-			payment.signature = crypto.randomBytes(64).toString("hex");
-			await payment.save();
-
-			// Update order payment status
-			order.payment.status = "paid";
-			order.payment.method = method;
-			order.payment.transactionId = payment.transactionId;
-			order.payment.paidAt = payment.paidAt;
-			order.isPaid = true;
-			await order.save();
-
-			res.status(201).json({
-				success: true,
-				message: "Payment processed successfully",
-				data: payment
-			});
-		} else {
-			payment.status = "failed";
-			payment.failureReason = gatewayResult.failureReason;
-			payment.gatewayResponse = gatewayResult.gatewayResponse;
-			await payment.save();
-
-			res.status(400).json({
-				success: false,
-				message: "Payment failed",
-				data: payment
-			});
-		}
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Retry failed payment
-router.post("/retry/:paymentId", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { paymentId } = req.params;
-		const userId = req.user._id;
-		const { paymentDetails } = req.body;
+// 🔄 REFUND PAYMENT
+router.post("/:id/refund", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const { amount, reason } = req.body;
+        const payment = await Payment.findById(req.params.id)
+            .populate("order", "orderId totalPrice status");
 
-		const payment = await Payment.findOne({ _id: paymentId, user: userId });
+        if (!payment) {
+            return res.status(404).json({
+                success: false,
+                message: "Payment not found"
+            });
+        }
 
-		if (!payment) {
-			return res.status(404).json({ success: false, message: "Payment not found" });
-		}
+        // Check if user owns the payment
+        if (payment.user.toString() !== req.user._id.toString()) {
+            return res.status(403).json({
+                success: false,
+                message: "You can only refund your own payments"
+            });
+        }
 
-		if (payment.status !== "failed") {
-			return res.status(400).json({ success: false, message: "Only failed payments can be retried" });
-		}
+        // Check if payment can be refunded
+        if (payment.status !== "success") {
+            return res.status(400).json({
+                success: false,
+                message: `Payment cannot be refunded. Current status: ${payment.status}`
+            });
+        }
 
-		// Process payment again
-		const gatewayResult = await processPaymentGateway({
-			amount: payment.amount,
-			method: payment.method,
-			provider: payment.provider,
-			...paymentDetails
-		});
+        if (payment.refund.status !== "none") {
+            return res.status(400).json({
+                success: false,
+                message: `Refund already ${payment.refund.status}`
+            });
+        }
 
-		if (gatewayResult.success) {
-			payment.status = "success";
-			payment.isVerified = true;
-			payment.paidAt = new Date();
-			payment.transactionId = gatewayResult.transactionId || generateTransactionId();
-			payment.paymentIntentId = gatewayResult.paymentIntentId;
-			payment.gatewayResponse = gatewayResult.gatewayResponse;
-			payment.failureReason = null;
-			await payment.save();
+        const refundAmount = amount || payment.amount;
+        if (refundAmount > payment.amount) {
+            return res.status(400).json({
+                success: false,
+                message: "Refund amount cannot exceed payment amount"
+            });
+        }
 
-			// Update order
-			const order = await Order.findById(payment.order);
-			if (order) {
-				order.payment.status = "paid";
-				order.payment.transactionId = payment.transactionId;
-				order.payment.paidAt = payment.paidAt;
-				order.isPaid = true;
-				await order.save();
-			}
+        // Process refund
+        payment.refund.status = "processed";
+        payment.refund.amount = refundAmount;
+        payment.refund.refundedAt = new Date();
+        
+        // Generate refund ID
+        payment.refund.refundId = "REF-" + Date.now().toString().slice(-8) + "-" + 
+                                  crypto.randomBytes(4).toString("hex").toUpperCase();
 
-			res.json({
-				success: true,
-				message: "Payment retry successful",
-				data: payment
-			});
-		} else {
-			payment.status = "failed";
-			payment.failureReason = gatewayResult.failureReason;
-			payment.gatewayResponse = gatewayResult.gatewayResponse;
-			await payment.save();
+        // Update payment status
+        if (refundAmount === payment.amount) {
+            payment.status = "refunded";
+        }
 
-			res.status(400).json({
-				success: false,
-				message: "Payment retry failed",
-				data: payment
-			});
-		}
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        // Update order
+        await Order.findByIdAndUpdate(payment.order, {
+            "payment.status": "refunded",
+            isPaid: false,
+            "refund.status": "completed",
+            "refund.amount": refundAmount,
+            "refund.reason": reason || "Refund requested by user"
+        });
+
+        await payment.save();
+
+        res.json({
+            success: true,
+            message: "Refund processed successfully",
+            data: payment
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Request refund for payment
-router.post("/:paymentId/refund", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { paymentId } = req.params;
-		const userId = req.user._id;
-		const { reason, amount } = req.body;
+// 📊 GET PAYMENT SUMMARY
+router.get("/summary", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const payments = await Payment.find({ user: req.user._id });
 
-		if (!reason) {
-			return res.status(400).json({ success: false, message: "Refund reason is required" });
-		}
+        const summary = {
+            totalPayments: payments.length,
+            totalSpent: payments
+                .filter(p => p.status === "success")
+                .reduce((sum, p) => sum + p.amount, 0),
+            totalRefunded: payments
+                .filter(p => p.status === "refunded")
+                .reduce((sum, p) => sum + p.amount, 0),
+            pendingPayments: payments.filter(p => p.status === "pending").length,
+            successfulPayments: payments.filter(p => p.status === "success").length,
+            failedPayments: payments.filter(p => p.status === "failed").length,
+            refundedPayments: payments.filter(p => p.status === "refunded").length,
+            lastPayment: payments.length > 0 ? payments[payments.length - 1].createdAt : null,
+            byMethod: {
+                COD: payments.filter(p => p.method === "COD").length,
+                CARD: payments.filter(p => p.method === "CARD").length,
+                UPI: payments.filter(p => p.method === "UPI").length,
+                NETBANKING: payments.filter(p => p.method === "NETBANKING").length,
+                WALLET: payments.filter(p => p.method === "WALLET").length
+            }
+        };
 
-		const payment = await Payment.findOne({ _id: paymentId, user: userId });
+        res.json({
+            success: true,
+            data: summary
+        });
 
-		if (!payment) {
-			return res.status(404).json({ success: false, message: "Payment not found" });
-		}
-
-		if (payment.status !== "success") {
-			return res.status(400).json({ success: false, message: "Only successful payments can be refunded" });
-		}
-
-		if (payment.refund.status !== "none") {
-			return res.status(400).json({ success: false, message: `Refund already ${payment.refund.status}` });
-		}
-
-		const refundAmount = amount || payment.amount;
-
-		if (refundAmount > payment.amount) {
-			return res.status(400).json({ success: false, message: "Refund amount cannot exceed payment amount" });
-		}
-
-		payment.refund = {
-			refundId: `REF_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
-			amount: refundAmount,
-			status: "pending",
-			refundedAt: null
-		};
-		payment.status = "refunded";
-		await payment.save();
-
-		// Update order
-		const order = await Order.findById(payment.order);
-		if (order) {
-			order.refund.status = "requested";
-			order.refund.amount = refundAmount;
-			order.refund.reason = reason;
-			await order.save();
-		}
-
-		res.json({
-			success: true,
-			message: "Refund request submitted successfully",
-			data: payment
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Get payment statistics for user
-router.get("/stats/my-stats", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
+// 🔐 VERIFY PAYMENT (For payment gateway webhook)
+router.post("/verify", async (req, res) => {
+    try {
+        const { paymentId, signature, status, transactionId, gatewayResponse } = req.body;
 
-		const stats = await Payment.aggregate([
-			{ $match: { user: userId } },
-			{
-				$group: {
-					_id: null,
-					totalPayments: { $sum: 1 },
-					totalAmount: { $sum: "$amount" },
-					successfulPayments: { $sum: { $cond: [{ $eq: ["$status", "success"] }, 1, 0] } },
-					failedPayments: { $sum: { $cond: [{ $eq: ["$status", "failed"] }, 1, 0] } },
-					refundedPayments: { $sum: { $cond: [{ $eq: ["$status", "refunded"] }, 1, 0] } },
-					totalRefundAmount: { $sum: "$refund.amount" }
-				}
-			}
-		]);
+        if (!paymentId) {
+            return res.status(400).json({
+                success: false,
+                message: "Payment ID is required"
+            });
+        }
 
-		const recentPayments = await Payment.find({ user: userId })
-			.sort("-createdAt")
-			.limit(5)
-			.populate("order", "orderId")
-			.lean();
+        const payment = await Payment.findById(paymentId);
+        if (!payment) {
+            return res.status(404).json({
+                success: false,
+                message: "Payment not found"
+            });
+        }
 
-		res.json({
-			success: true,
-			data: {
-				stats: stats[0] || {
-					totalPayments: 0,
-					totalAmount: 0,
-					successfulPayments: 0,
-					failedPayments: 0,
-					refundedPayments: 0,
-					totalRefundAmount: 0
-				},
-				recentPayments
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        // Verify signature (simplified - implement actual verification based on gateway)
+        // In production, use proper signature verification for Razorpay/Stripe
+        const isVerified = true; // Placeholder
+
+        if (isVerified) {
+            payment.status = status || "success";
+            payment.isVerified = true;
+            payment.signature = signature || null;
+            payment.transactionId = transactionId || payment.transactionId;
+            payment.paidAt = new Date();
+            payment.gatewayResponse = gatewayResponse || {};
+
+            // Update order
+            await Order.findByIdAndUpdate(payment.order, {
+                "payment.status": "paid",
+                "payment.transactionId": transactionId || payment.transactionId,
+                "payment.paidAt": new Date(),
+                isPaid: true
+            });
+
+            await payment.save();
+
+            res.json({
+                success: true,
+                message: "Payment verified successfully",
+                data: payment
+            });
+        } else {
+            payment.status = "failed";
+            payment.failureReason = "Signature verification failed";
+            await payment.save();
+
+            // Update order
+            await Order.findByIdAndUpdate(payment.order, {
+                "payment.status": "failed"
+            });
+
+            res.status(400).json({
+                success: false,
+                message: "Payment verification failed",
+                data: payment
+            });
+        }
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Verify payment signature (webhook-like endpoint)
-router.post("/verify", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { paymentId, signature } = req.body;
+// 📥 GET PAYMENT RECEIPT
+router.get("/:id/receipt", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const payment = await Payment.findById(req.params.id)
+            .populate("order", "orderId totalPrice status createdAt")
+            .populate("user", "name email phone addresses");
 
-		const payment = await Payment.findById(paymentId);
+        if (!payment) {
+            return res.status(404).json({
+                success: false,
+                message: "Payment not found"
+            });
+        }
 
-		if (!payment) {
-			return res.status(404).json({ success: false, message: "Payment not found" });
-		}
+        // Check if user owns the payment
+        if (payment.user._id.toString() !== req.user._id.toString() && req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "You can only view your own payment receipts"
+            });
+        }
 
-		// Verify signature (simplified for demo)
-		const expectedSignature = crypto
-			.createHmac("sha256", process.env.PAYMENT_WEBHOOK_SECRET || "secret_key")
-			.update(`${payment.transactionId}${payment.amount}`)
-			.digest("hex");
+        // Generate receipt data
+        const receipt = {
+            receiptId: payment.transactionId || payment._id,
+            orderId: payment.order.orderId,
+            date: payment.paidAt || payment.createdAt,
+            amount: payment.amount,
+            method: payment.method,
+            status: payment.status,
+            customer: {
+                name: payment.user.name,
+                email: payment.user.email,
+                phone: payment.user.phone
+            },
+            items: payment.order.items || [],
+            refund: payment.refund,
+            gatewayResponse: payment.gatewayResponse
+        };
 
-		if (signature === expectedSignature) {
-			payment.isVerified = true;
-			payment.signature = signature;
-			await payment.save();
+        res.json({
+            success: true,
+            data: receipt
+        });
 
-			res.json({
-				success: true,
-				message: "Payment verified successfully"
-			});
-		} else {
-			res.status(400).json({
-				success: false,
-				message: "Invalid signature"
-			});
-		}
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
 // ==============================
-// 🔐 ADMIN ROUTES
+// 👑 ADMIN PAYMENT ROUTES
 // ==============================
 
-// Get all payments (Admin only)
-router.get("/admin/all", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const {
-			page = 1,
-			limit = 20,
-			sort = "-createdAt",
-			status,
-			method,
-			provider,
-			fromDate,
-			toDate,
-			search
-		} = req.query;
+// 📥 GET ALL PAYMENTS (Admin Only)
+router.get("/admin/all", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		const query = {};
+        const {
+            page = 1,
+            limit = 20,
+            status,
+            method,
+            provider,
+            search,
+            dateFrom,
+            dateTo,
+            sort = "-createdAt"
+        } = req.query;
 
-		if (status) query.status = status;
-		if (method) query.method = method;
-		if (provider) query.provider = provider;
-		if (fromDate || toDate) {
-			query.createdAt = {};
-			if (fromDate) query.createdAt.$gte = new Date(fromDate);
-			if (toDate) query.createdAt.$lte = new Date(toDate);
-		}
-		if (search) {
-			query.$or = [
-				{ transactionId: { $regex: search, $options: "i" } },
-				{ invoiceId: { $regex: search, $options: "i" } },
-				{ paymentIntentId: { $regex: search, $options: "i" } }
-			];
-		}
+        const filter = {};
 
-		const payments = await Payment.find(query)
-			.populate("order", "orderId status totalPrice")
-			.populate("user", "name email phone")
-			.sort(sort)
-			.limit(limit * 1)
-			.skip((page - 1) * limit)
-			.lean();
+        if (status) filter.status = status;
+        if (method) filter.method = method;
+        if (provider) filter.provider = provider;
+        if (search) {
+            const userMatch = await User.find({
+                $or: [
+                    { name: { $regex: search, $options: "i" } },
+                    { email: { $regex: search, $options: "i" } }
+                ]
+            }).select("_id");
+            
+            const userIds = userMatch.map(u => u._id);
+            filter.$or = [
+                { user: { $in: userIds } },
+                { transactionId: { $regex: search, $options: "i" } }
+            ];
+        }
+        if (dateFrom || dateTo) {
+            filter.createdAt = {};
+            if (dateFrom) filter.createdAt.$gte = new Date(dateFrom);
+            if (dateTo) filter.createdAt.$lte = new Date(dateTo);
+        }
 
-		const total = await Payment.countDocuments(query);
+        const pageNum = parseInt(page);
+        const limitNum = parseInt(limit);
+        const skip = (pageNum - 1) * limitNum;
 
-		// Calculate summary
-		const summary = await Payment.aggregate([
-			{ $match: query },
-			{
-				$group: {
-					_id: null,
-					totalPayments: { $sum: 1 },
-					totalAmount: { $sum: "$amount" },
-					successfulAmount: { $sum: { $cond: [{ $eq: ["$status", "success"] }, "$amount", 0] } },
-					failedAmount: { $sum: { $cond: [{ $eq: ["$status", "failed"] }, "$amount", 0] } },
-					refundedAmount: { $sum: "$refund.amount" },
-					successfulCount: { $sum: { $cond: [{ $eq: ["$status", "success"] }, 1, 0] } },
-					failedCount: { $sum: { $cond: [{ $eq: ["$status", "failed"] }, 1, 0] } },
-					refundedCount: { $sum: { $cond: [{ $eq: ["$status", "refunded"] }, 1, 0] } }
-				}
-			}
-		]);
+        const payments = await Payment.find(filter)
+            .populate("order", "orderId totalPrice status")
+            .populate("user", "name email phone")
+            .sort(sort)
+            .skip(skip)
+            .limit(limitNum);
 
-		res.json({
-			success: true,
-			data: {
-				payments,
-				summary: summary[0] || {
-					totalPayments: 0,
-					totalAmount: 0,
-					successfulAmount: 0,
-					failedAmount: 0,
-					refundedAmount: 0,
-					successfulCount: 0,
-					failedCount: 0,
-					refundedCount: 0
-				},
-				pagination: {
-					page: parseInt(page),
-					limit: parseInt(limit),
-					total,
-					pages: Math.ceil(total / limit)
-				}
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        const total = await Payment.countDocuments(filter);
+
+        // Calculate summary
+        const summary = {
+            totalAmount: payments.reduce((sum, p) => sum + p.amount, 0),
+            successfulAmount: payments
+                .filter(p => p.status === "success")
+                .reduce((sum, p) => sum + p.amount, 0),
+            refundedAmount: payments
+                .filter(p => p.status === "refunded")
+                .reduce((sum, p) => sum + p.amount, 0),
+            pendingCount: payments.filter(p => p.status === "pending").length,
+            processingCount: payments.filter(p => p.status === "processing").length,
+            successCount: payments.filter(p => p.status === "success").length,
+            failedCount: payments.filter(p => p.status === "failed").length,
+            refundedCount: payments.filter(p => p.status === "refunded").length,
+            cancelledCount: payments.filter(p => p.status === "cancelled").length
+        };
+
+        res.json({
+            success: true,
+            data: payments,
+            summary,
+            pagination: {
+                page: pageNum,
+                limit: limitNum,
+                total,
+                pages: Math.ceil(total / limitNum)
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Get payment details (Admin only)
-router.get("/admin/:paymentId", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { paymentId } = req.params;
+// 📄 GET PAYMENT DETAILS (Admin Only)
+router.get("/admin/getpaymentdetails/:id", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		const payment = await Payment.findById(paymentId)
-			.populate("order", "orderId status totalPrice shippingAddress items coupon")
-			.populate("user", "name email phone address")
-			.lean();
+        const payment = await Payment.findById(req.params.id)
+            .populate("order", "orderId totalPrice status items addresses")
+            .populate("user", "name email phone addresses");
 
-		if (!payment) {
-			return res.status(404).json({ success: false, message: "Payment not found" });
-		}
+        if (!payment) {
+            return res.status(404).json({
+                success: false,
+                message: "Payment not found"
+            });
+        }
 
-		res.json({ success: true, data: payment });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        res.json({
+            success: true,
+            data: payment
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Update payment status (Admin only)
-router.patch("/admin/:paymentId/status", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { paymentId } = req.params;
-		const { status, failureReason } = req.body;
+// ✏️ UPDATE PAYMENT STATUS (Admin Only)
+router.put("/admin/updatepaymentstatus/:id", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		const validStatuses = ["pending", "processing", "success", "failed", "cancelled", "refunded"];
+        const { status, failureReason, notes } = req.body;
+        const validStatuses = ["pending", "processing", "success", "failed", "cancelled", "refunded"];
 
-		if (!validStatuses.includes(status)) {
-			return res.status(400).json({ success: false, message: "Invalid status" });
-		}
+        if (!status || !validStatuses.includes(status)) {
+            return res.status(400).json({
+                success: false,
+                message: `Valid status required: ${validStatuses.join(", ")}`
+            });
+        }
 
-		const payment = await Payment.findById(paymentId);
+        const payment = await Payment.findById(req.params.id);
+        if (!payment) {
+            return res.status(404).json({
+                success: false,
+                message: "Payment not found"
+            });
+        }
 
-		if (!payment) {
-			return res.status(404).json({ success: false, message: "Payment not found" });
-		}
+        payment.status = status;
+        if (failureReason) payment.failureReason = failureReason;
+        if (notes) payment.notes = notes;
 
-		payment.status = status;
-		if (status === "success") {
-			payment.isVerified = true;
-			payment.paidAt = new Date();
-		}
-		if (status === "failed" && failureReason) {
-			payment.failureReason = failureReason;
-		}
-		if (status === "cancelled") {
-			payment.failureReason = "Payment cancelled by admin";
-		}
+        if (status === "success") {
+            payment.paidAt = new Date();
+            payment.isVerified = true;
+        }
 
-		await payment.save();
+        if (status === "refunded") {
+            payment.refund.status = "processed";
+            payment.refund.refundedAt = new Date();
+        }
 
-		// Update order status accordingly
-		const order = await Order.findById(payment.order);
-		if (order) {
-			if (status === "success") {
-				order.payment.status = "paid";
-				order.isPaid = true;
-				order.payment.paidAt = payment.paidAt;
-			} else if (status === "failed" || status === "cancelled") {
-				order.payment.status = "failed";
-			}
-			await order.save();
-		}
+        await payment.save();
 
-		res.json({
-			success: true,
-			message: `Payment status updated to ${status}`,
-			data: payment
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        // Update order payment status
+        const orderUpdate = {
+            "payment.status": status
+        };
+        if (status === "success") {
+            orderUpdate.isPaid = true;
+            orderUpdate["payment.paidAt"] = new Date();
+        }
+        if (status === "refunded") {
+            orderUpdate.isPaid = false;
+        }
+
+        await Order.findByIdAndUpdate(payment.order, orderUpdate);
+
+        res.json({
+            success: true,
+            message: "Payment status updated",
+            data: payment
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Process refund (Admin only)
-router.post("/admin/:paymentId/refund", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { paymentId } = req.params;
-		const { amount, reason } = req.body;
+// 💰 PROCESS REFUND (Admin Only)
+router.post("/admin/processrefund/:id", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		const payment = await Payment.findById(paymentId);
+        const { amount, reason } = req.body;
+        const payment = await Payment.findById(req.params.id)
+            .populate("order", "orderId totalPrice");
 
-		if (!payment) {
-			return res.status(404).json({ success: false, message: "Payment not found" });
-		}
+        if (!payment) {
+            return res.status(404).json({
+                success: false,
+                message: "Payment not found"
+            });
+        }
 
-		if (payment.status !== "success") {
-			return res.status(400).json({ success: false, message: "Only successful payments can be refunded" });
-		}
+        if (payment.status !== "success") {
+            return res.status(400).json({
+                success: false,
+                message: `Payment cannot be refunded. Current status: ${payment.status}`
+            });
+        }
 
-		const refundAmount = amount || payment.amount;
+        const refundAmount = amount || payment.amount;
+        if (refundAmount > payment.amount) {
+            return res.status(400).json({
+                success: false,
+                message: "Refund amount cannot exceed payment amount"
+            });
+        }
 
-		if (refundAmount > payment.amount) {
-			return res.status(400).json({ success: false, message: "Refund amount cannot exceed payment amount" });
-		}
+        payment.refund.status = "processed";
+        payment.refund.amount = refundAmount;
+        payment.refund.refundedAt = new Date();
+        payment.refund.refundId = "REF-" + Date.now().toString().slice(-8) + "-" + 
+                                 crypto.randomBytes(4).toString("hex").toUpperCase();
 
-		// Process refund (simulate gateway refund)
-		payment.refund = {
-			refundId: `REF_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
-			amount: refundAmount,
-			status: "processed",
-			refundedAt: new Date()
-		};
-		payment.status = "refunded";
-		await payment.save();
+        if (refundAmount === payment.amount) {
+            payment.status = "refunded";
+        }
 
-		// Update order
-		const order = await Order.findById(payment.order);
-		if (order) {
-			order.refund.status = "approved";
-			order.refund.amount = refundAmount;
-			order.refund.reason = reason || "Processed by admin";
-			order.payment.status = "refunded";
-			await order.save();
-		}
+        await payment.save();
 
-		res.json({
-			success: true,
-			message: "Refund processed successfully",
-			data: payment
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        // Update order
+        await Order.findByIdAndUpdate(payment.order, {
+            "payment.status": "refunded",
+            isPaid: false,
+            "refund.status": "completed",
+            "refund.amount": refundAmount,
+            "refund.reason": reason || "Refund processed by admin"
+        });
+
+        res.json({
+            success: true,
+            message: "Refund processed successfully",
+            data: payment
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Get payment analytics (Admin only)
-router.get("/admin/analytics", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { period = "month" } = req.query;
+// 📊 GET PAYMENT STATISTICS (Admin Only)
+router.get("/admin/stats", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		let dateFilter = {};
-		const now = new Date();
-		
-		if (period === "week") {
-			dateFilter = { createdAt: { $gte: new Date(now.setDate(now.getDate() - 7)) } };
-		} else if (period === "month") {
-			dateFilter = { createdAt: { $gte: new Date(now.setMonth(now.getMonth() - 1)) } };
-		} else if (period === "year") {
-			dateFilter = { createdAt: { $gte: new Date(now.setFullYear(now.getFullYear() - 1)) } };
-		}
 
-		const analytics = await Payment.aggregate([
-			{ $match: { ...dateFilter, status: "success" } },
-			{
-				$group: {
-					_id: {
-						date: { $dateToString: { format: period === "week" ? "%Y-%m-%d" : period === "month" ? "%Y-%m" : "%Y", date: "$createdAt" } },
-						method: "$method"
-					},
-					count: { $sum: 1 },
-					amount: { $sum: "$amount" }
-				}
-			},
-			{ $sort: { "_id.date": 1 } }
-		]);
+        // Overall stats
+        const totalPayments = await Payment.countDocuments();
+        const totalRevenue = await Payment.aggregate([
+            { $match: { status: "success" } },
+            { $group: { _id: null, total: { $sum: "$amount" } } }
+        ]);
 
-		const methodBreakdown = await Payment.aggregate([
-			{ $match: dateFilter },
-			{
-				$group: {
-					_id: "$method",
-					count: { $sum: 1 },
-					totalAmount: { $sum: "$amount" },
-					successCount: { $sum: { $cond: [{ $eq: ["$status", "success"] }, 1, 0] } },
-					failedCount: { $sum: { $cond: [{ $eq: ["$status", "failed"] }, 1, 0] } }
-				}
-			}
-		]);
+        const totalRefunded = await Payment.aggregate([
+            { $match: { status: "refunded" } },
+            { $group: { _id: null, total: { $sum: "$amount" } } }
+        ]);
 
-		res.json({
-			success: true,
-			data: {
-				analytics,
-				methodBreakdown,
-				period
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        // Payment status distribution
+        const statusDistribution = await Payment.aggregate([
+            {
+                $group: {
+                    _id: "$status",
+                    count: { $sum: 1 },
+                    totalAmount: { $sum: "$amount" }
+                }
+            }
+        ]);
+
+        // Payment method distribution
+        const methodDistribution = await Payment.aggregate([
+            {
+                $group: {
+                    _id: "$method",
+                    count: { $sum: 1 },
+                    totalAmount: { $sum: "$amount" }
+                }
+            }
+        ]);
+
+        // Daily payments for last 7 days
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+        const dailyPayments = await Payment.aggregate([
+            {
+                $match: {
+                    createdAt: { $gte: sevenDaysAgo },
+                    status: "success"
+                }
+            },
+            {
+                $group: {
+                    _id: {
+                        $dateToString: { format: "%Y-%m-%d", date: "$createdAt" }
+                    },
+                    count: { $sum: 1 },
+                    totalAmount: { $sum: "$amount" }
+                }
+            },
+            {
+                $sort: { _id: 1 }
+            }
+        ]);
+
+        // Monthly revenue trend
+        const sixMonthsAgo = new Date();
+        sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+
+        const monthlyRevenue = await Payment.aggregate([
+            {
+                $match: {
+                    createdAt: { $gte: sixMonthsAgo },
+                    status: "success"
+                }
+            },
+            {
+                $group: {
+                    _id: {
+                        year: { $year: "$createdAt" },
+                        month: { $month: "$createdAt" }
+                    },
+                    totalAmount: { $sum: "$amount" },
+                    count: { $sum: 1 }
+                }
+            },
+            {
+                $sort: { "_id.year": 1, "_id.month": 1 }
+            }
+        ]);
+
+        // Average payment amount
+        const averagePayment = await Payment.aggregate([
+            { $match: { status: "success" } },
+            { $group: { _id: null, avg: { $avg: "$amount" } } }
+        ]);
+
+        res.json({
+            success: true,
+            data: {
+                totalPayments,
+                totalRevenue: totalRevenue.length > 0 ? totalRevenue[0].total : 0,
+                totalRefunded: totalRefunded.length > 0 ? totalRefunded[0].total : 0,
+                netRevenue: (totalRevenue.length > 0 ? totalRevenue[0].total : 0) - 
+                           (totalRefunded.length > 0 ? totalRefunded[0].total : 0),
+                statusDistribution,
+                methodDistribution,
+                dailyPayments,
+                monthlyRevenue,
+                averagePayment: averagePayment.length > 0 ? averagePayment[0].avg : 0
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Get payment webhook (for gateway callbacks)
-router.post("/webhook", async (req, res) => {
-	try {
-		const { event, data } = req.body;
+// 📥 GET USER PAYMENTS (Admin Only)
+router.get("/admin/users/:userId", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		// Handle different webhook events from payment gateway
-		switch (event) {
-			case "payment.success":
-				const payment = await Payment.findOne({ transactionId: data.transactionId });
-				if (payment) {
-					payment.status = "success";
-					payment.isVerified = true;
-					payment.paidAt = new Date();
-					payment.gatewayResponse = data;
-					await payment.save();
+        const payments = await Payment.find({ user: req.params.userId })
+            .populate("order", "orderId totalPrice status")
+            .sort("-createdAt");
 
-					const order = await Order.findById(payment.order);
-					if (order) {
-						order.payment.status = "paid";
-						order.isPaid = true;
-						await order.save();
-					}
-				}
-				break;
+        const summary = {
+            totalPayments: payments.length,
+            totalAmount: payments.reduce((sum, p) => sum + p.amount, 0),
+            successfulPayments: payments.filter(p => p.status === "success").length,
+            refundedPayments: payments.filter(p => p.status === "refunded").length,
+            failedPayments: payments.filter(p => p.status === "failed").length
+        };
 
-			case "payment.failed":
-				const failedPayment = await Payment.findOne({ transactionId: data.transactionId });
-				if (failedPayment) {
-					failedPayment.status = "failed";
-					failedPayment.failureReason = data.reason;
-					failedPayment.gatewayResponse = data;
-					await failedPayment.save();
-				}
-				break;
+        res.json({
+            success: true,
+            summary,
+            data: payments
+        });
 
-			case "refund.success":
-				const refundPayment = await Payment.findOne({ "refund.refundId": data.refundId });
-				if (refundPayment) {
-					refundPayment.refund.status = "processed";
-					refundPayment.refund.refundedAt = new Date();
-					refundPayment.status = "refunded";
-					await refundPayment.save();
-				}
-				break;
-		}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
 
-		res.json({ success: true, message: "Webhook received" });
-	} catch (error) {
-		console.error("Webhook error:", error);
-		res.status(500).json({ success: false, message: error.message });
-	}
+// 📥 EXPORT PAYMENTS (Admin Only)
+router.get("/admin/export/csv", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const { dateFrom, dateTo, status, method } = req.query;
+        const filter = {};
+
+        if (status) filter.status = status;
+        if (method) filter.method = method;
+        if (dateFrom || dateTo) {
+            filter.createdAt = {};
+            if (dateFrom) filter.createdAt.$gte = new Date(dateFrom);
+            if (dateTo) filter.createdAt.$lte = new Date(dateTo);
+        }
+
+        const payments = await Payment.find(filter)
+            .populate("user", "name email")
+            .populate("order", "orderId")
+            .sort("-createdAt");
+
+        // Create CSV header
+        let csv = "Transaction ID,Order ID,Customer,Email,Amount,Method,Provider,Status,Payment Date,Refund Status\n";
+
+        // Add data rows
+        payments.forEach(payment => {
+            csv += `"${payment.transactionId || payment._id}","${payment.order?.orderId || 'N/A'}","${payment.user?.name || 'N/A'}","${payment.user?.email || 'N/A'}",${payment.amount},${payment.method},${payment.provider},${payment.status},"${payment.paidAt ? payment.paidAt.toISOString() : 'N/A'}","${payment.refund.status}"\n`;
+        });
+
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader("Content-Disposition", `attachment; filename=payments-${new Date().toISOString().split("T")[0]}.csv`);
+        res.send(csv);
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
 module.exports = router;

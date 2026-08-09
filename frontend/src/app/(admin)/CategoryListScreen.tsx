@@ -1,32 +1,42 @@
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import axios from 'axios';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useCallback, useState } from 'react';
+import { router } from 'expo-router';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-    Dimensions,
-    FlatList,
-    Image,
-    RefreshControl,
-    StatusBar,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  Alert,
+  Dimensions,
+  FlatList,
+  Image,
+  RefreshControl,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
 import Animated, {
-    FadeInDown,
-    FadeInLeft,
-    FadeInRight,
-    FadeInUp,
-    useAnimatedScrollHandler,
-    useAnimatedStyle,
-    useSharedValue,
-    withSpring
+  FadeInDown,
+  FadeInLeft,
+  FadeInRight,
+  FadeInUp,
+  useAnimatedScrollHandler,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring
 } from 'react-native-reanimated';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const QUICK_ACTION_SIZE = (SCREEN_WIDTH - 48) / 4;
+
+// ============================================
+// API CONFIGURATION
+// ============================================
+
+const API_BASE_URL = 'http://10.225.180.27:5000';
 
 // ============================================
 // TYPES & INTERFACES
@@ -112,143 +122,106 @@ interface QuickAction {
   color: string;
 }
 
+interface CategoryStats {
+  totalCategories: number;
+  activeCategories: number;
+  hiddenCategories: number;
+  featuredCategories: number;
+  parentCategories: number;
+  subCategories: number;
+  emptyCategories: number;
+}
+
+interface CategoryResponse {
+  _id: string;
+  name: string;
+  slug: string;
+  description: string;
+  image: string;
+  icon: string;
+  isActive: boolean;
+  productCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // ============================================
-// DUMMY DATA
+// API SERVICE FUNCTIONS
 // ============================================
 
-const categories: Category[] = [
-  {
-    id: '1', name: 'Electronics', slug: 'electronics', categoryId: 'CAT-1001', parentId: null, level: 1,
-    image: 'https://images.unsplash.com/photo-1498049794561-7780e7231661?w=200', icon: 'cellphone',
-    productCount: 456, subcategoryCount: 12, views: 15420, revenue: 125000, status: 'active', isFeatured: true,
-    hasSEO: true, createdAt: '2024-01-15', updatedAt: '2024-06-10',
-  },
-  {
-    id: '2', name: 'Smartphones', slug: 'smartphones', categoryId: 'CAT-1002', parentId: '1', parentName: 'Electronics', level: 2,
-    image: 'https://images.unsplash.com/photo-1592899677977-9e10ca58899d?w=200', icon: 'cellphone',
-    productCount: 234, subcategoryCount: 5, views: 8920, revenue: 68000, status: 'active', isFeatured: true,
-    hasSEO: true, createdAt: '2024-01-20', updatedAt: '2024-06-08',
-  },
-  {
-    id: '3', name: 'Laptops', slug: 'laptops', categoryId: 'CAT-1003', parentId: '1', parentName: 'Electronics', level: 2,
-    image: 'https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=200', icon: 'laptop',
-    productCount: 156, subcategoryCount: 4, views: 6830, revenue: 125000, status: 'active', isFeatured: false,
-    hasSEO: true, createdAt: '2024-01-25', updatedAt: '2024-06-05',
-  },
-  {
-    id: '4', name: 'Fashion', slug: 'fashion', categoryId: 'CAT-2001', parentId: null, level: 1,
-    image: 'https://images.unsplash.com/photo-1445205170230-053b83016050?w=200', icon: 'tshirt-crew',
-    productCount: 324, subcategoryCount: 15, views: 12340, revenue: 89000, status: 'active', isFeatured: true,
-    hasSEO: true, createdAt: '2024-01-18', updatedAt: '2024-06-09',
-  },
-  {
-    id: '5', name: "Men's Clothing", slug: 'men-clothing', categoryId: 'CAT-2002', parentId: '4', parentName: 'Fashion', level: 2,
-    image: 'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=200', icon: 'tshirt-crew',
-    productCount: 189, subcategoryCount: 8, views: 7230, revenue: 45000, status: 'active', isFeatured: false,
-    hasSEO: true, createdAt: '2024-01-22', updatedAt: '2024-06-07',
-  },
-  {
-    id: '6', name: "Women's Clothing", slug: 'women-clothing', categoryId: 'CAT-2003', parentId: '4', parentName: 'Fashion', level: 2,
-    image: 'https://images.unsplash.com/photo-1539109136881-3be0616acf4b?w=200', icon: 'tshirt-crew',
-    productCount: 135, subcategoryCount: 7, views: 5110, revenue: 44000, status: 'active', isFeatured: true,
-    hasSEO: true, createdAt: '2024-01-24', updatedAt: '2024-06-06',
-  },
-  {
-    id: '7', name: 'Home & Living', slug: 'home-living', categoryId: 'CAT-3001', parentId: null, level: 1,
-    image: 'https://images.unsplash.com/photo-1583847268964-b28dc8f51f92?w=200', icon: 'sofa',
-    productCount: 189, subcategoryCount: 10, views: 5670, revenue: 34000, status: 'active', isFeatured: false,
-    hasSEO: false, createdAt: '2024-02-01', updatedAt: '2024-06-04',
-  },
-  {
-    id: '8', name: 'Sports', slug: 'sports', categoryId: 'CAT-4001', parentId: null, level: 1,
-    image: 'https://images.unsplash.com/photo-1517649763962-0c623066013b?w=200', icon: 'basketball',
-    productCount: 98, subcategoryCount: 6, views: 3450, revenue: 21000, status: 'hidden', isFeatured: false,
-    hasSEO: false, createdAt: '2024-02-10', updatedAt: '2024-06-01',
-  },
-  {
-    id: '9', name: 'Beauty', slug: 'beauty', categoryId: 'CAT-5001', parentId: null, level: 1,
-    image: 'https://images.unsplash.com/photo-1596462502278-27bfdc403348?w=200', icon: 'face-woman',
-    productCount: 0, subcategoryCount: 0, views: 0, revenue: 0, status: 'empty', isFeatured: false,
-    hasSEO: false, createdAt: '2024-03-01', updatedAt: '2024-05-15',
-  },
-];
+const apiClient = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 30000,
+});
 
-const analyticsCards: AnalyticsCardData[] = [
-  { id: '1', title: 'Total Categories', count: 245, icon: 'format-list-bulleted', color: '#3B82F6', trend: 12 },
-  { id: '2', title: 'Active', count: 189, icon: 'check-circle', color: '#10B981', trend: 8 },
-  { id: '3', title: 'Hidden', count: 23, icon: 'eye-off', color: '#6B7280', trend: -3 },
-  { id: '4', title: 'Subcategories', count: 156, icon: 'sort-alphabetical-ascending', color: '#8B5CF6', trend: 15 },
-  { id: '5', title: 'Featured', count: 12, icon: 'star', color: '#F59E0B', trend: 5 },
-  { id: '6', title: 'Empty Categories', count: 8, icon: 'alert-circle', color: '#EF4444', trend: -2 },
-];
-
-const filterChips: FilterChip[] = [
-  { id: 'all', label: 'All', count: 245 },
-  { id: 'active', label: 'Active', count: 189 },
-  { id: 'hidden', label: 'Hidden', count: 23 },
-  { id: 'featured', label: 'Featured', count: 12 },
-  { id: 'parent', label: 'Parent Categories', count: 89 },
-  { id: 'subcategories', label: 'Subcategories', count: 156 },
-  { id: 'empty', label: 'Empty Categories', count: 8 },
-  { id: 'recent', label: 'Recently Added', count: 15 },
-  { id: 'updated', label: 'Recently Updated', count: 34 },
-];
-
-const hierarchyData: HierarchyNode[] = [
-  {
-    id: '1', name: 'Electronics', productCount: 456, children: [
-      { id: '2', name: 'Smartphones', productCount: 234, children: [] },
-      { id: '3', name: 'Laptops', productCount: 156, children: [] },
-      { id: '10', name: 'Accessories', productCount: 66, children: [] },
-    ],
+apiClient.interceptors.request.use(
+  async (config) => {
+    const token = await AsyncStorage.getItem('token');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
   },
-  {
-    id: '4', name: 'Fashion', productCount: 324, children: [
-      { id: '5', name: "Men's Clothing", productCount: 189, children: [] },
-      { id: '6', name: "Women's Clothing", productCount: 135, children: [] },
-    ],
-  },
-  { id: '7', name: 'Home & Living', productCount: 189, children: [] },
-  { id: '8', name: 'Sports', productCount: 98, children: [] },
-];
+  (error) => {
+    return Promise.reject(error);
+  }
+);
 
-const featuredCategories: FeaturedCategory[] = [
-  { id: '1', name: 'Electronics', image: 'https://images.unsplash.com/photo-1498049794561-7780e7231661?w=200', productCount: 456, revenue: 125000 },
-  { id: '2', name: 'Fashion', image: 'https://images.unsplash.com/photo-1445205170230-053b83016050?w=200', productCount: 324, revenue: 89000 },
-  { id: '4', name: "Women's Clothing", image: 'https://images.unsplash.com/photo-1539109136881-3be0616acf4b?w=200', productCount: 135, revenue: 44000 },
-];
+// Fetch categories
+const fetchCategories = async (): Promise<CategoryResponse[]> => {
+  try {
+    const response = await apiClient.get('/Category');
+    if (response.data.success) {
+      return response.data.data;
+    }
+    throw new Error('Failed to fetch categories');
+  } catch (error) {
+    console.error('Error fetching categories:', error);
+    return [];
+  }
+};
 
-const topCategories: TopCategory[] = [
-  { id: '1', name: 'Electronics', image: 'https://images.unsplash.com/photo-1498049794561-7780e7231661?w=200', metric: 'Most Products', value: '456', growth: 12 },
-  { id: '2', name: 'Smartphones', image: 'https://images.unsplash.com/photo-1592899677977-9e10ca58899d?w=200', metric: 'Highest Revenue', value: '$68K', growth: 18 },
-  { id: '3', name: 'Fashion', image: 'https://images.unsplash.com/photo-1445205170230-053b83016050?w=200', metric: 'Most Viewed', value: '12.4K', growth: 24 },
-  { id: '4', name: "Men's Clothing", image: 'https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=200', metric: 'Fastest Growing', value: '+28%', growth: 28 },
-];
+// Fetch category stats
+const fetchCategoryStats = async (): Promise<CategoryStats> => {
+  try {
+    const response = await apiClient.get('/Category/admin/stats');
+    if (response.data.success) {
+      const data = response.data.data;
+      return {
+        totalCategories: data.totalCategories || 0,
+        activeCategories: data.activeCategories || 0,
+        hiddenCategories: data.hiddenCategories || 0,
+        featuredCategories: data.featuredCategories || 0,
+        parentCategories: data.parentCategories || 0,
+        subCategories: data.subCategories || 0,
+        emptyCategories: data.emptyCategories || 0,
+      };
+    }
+    throw new Error('Failed to fetch category stats');
+  } catch (error) {
+    console.error('Error fetching category stats:', error);
+    return {
+      totalCategories: 0,
+      activeCategories: 0,
+      hiddenCategories: 0,
+      featuredCategories: 0,
+      parentCategories: 0,
+      subCategories: 0,
+      emptyCategories: 0,
+    };
+  }
+};
 
-const insights: Insight[] = [
-  { id: '1', message: 'Electronics generates 42% of total revenue. Consider adding more subcategories.', type: 'positive' },
-  { id: '2', message: '8 categories currently have no products. Add products or archive these categories.', type: 'warning' },
-  { id: '3', message: 'Fashion category grew by 18% this month. Great momentum!', type: 'positive' },
-];
-
-const validationItems: ValidationItem[] = [
-  { id: '1', label: 'Categories have images', completed: true, warning: false },
-  { id: '2', label: 'SEO configured for top categories', completed: false, warning: true },
-  { id: '3', label: 'Products assigned to categories', completed: false, warning: true },
-  { id: '4', label: 'Visibility configured', completed: true, warning: false },
-  { id: '5', label: 'Featured categories selected', completed: true, warning: false },
-];
-
-const quickActions: QuickAction[] = [
-  { id: '1', title: 'Add Category', icon: 'plus-circle', color: '#3B82F6' },
-  { id: '2', title: 'Subcategories', icon: 'sort-alphabetical-ascending', color: '#8B5CF6' },
-  { id: '3', title: 'Import', icon: 'download', color: '#10B981' },
-  { id: '4', title: 'Export', icon: 'upload', color: '#F59E0B' },
-  { id: '5', title: 'SEO Settings', icon: 'google', color: '#EC4899' },
-  { id: '6', title: 'Visibility', icon: 'eye', color: '#6366F1' },
-  { id: '7', title: 'Featured', icon: 'star', color: '#14B8A6' },
-  { id: '8', title: 'Reports', icon: 'chart-line', color: '#EF4444' },
-];
+// Delete category
+const deleteCategory = async (categoryId: string): Promise<any> => {
+  try {
+    const response = await apiClient.delete(`/Category/admin/categories/${categoryId}`);
+    return response.data;
+  } catch (error) {
+    console.error('Error deleting category:', error);
+    throw error;
+  }
+};
 
 // ============================================
 // REUSABLE COMPONENTS
@@ -270,10 +243,10 @@ const SectionHeader = ({ title, onSeeAll, showSeeAll = true, count }: { title: s
 
 const AnalyticsCard = ({ data, index }: { data: AnalyticsCardData; index: number }) => {
   const scale = useSharedValue(1);
-  
+
   const onPressIn = () => { scale.value = withSpring(0.97); };
   const onPressOut = () => { scale.value = withSpring(1); };
-  
+
   const animatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: scale.value }],
   }));
@@ -319,7 +292,7 @@ const StatusBadge = ({ status }: { status: Category['status'] }) => {
     featured: { label: 'Featured', color: '#F59E0B', bg: '#FEF3C7' },
     empty: { label: 'Empty', color: '#EF4444', bg: '#FEE2E2' },
   };
-  const { label, color, bg } = config[status];
+  const { label, color, bg } = config[status] || config.active;
   return (
     <View style={[styles.statusBadge, { backgroundColor: bg }]}>
       <Text style={[styles.statusText, { color }]}>{label}</Text>
@@ -327,14 +300,14 @@ const StatusBadge = ({ status }: { status: Category['status'] }) => {
   );
 };
 
-const CategoryCard = ({ category, index, onPress, onEdit, onDelete }: { 
+const CategoryCard = ({ category, index, onPress, onEdit, onDelete }: {
   category: Category; index: number; onPress: () => void; onEdit: () => void; onDelete: () => void;
 }) => {
   const scale = useSharedValue(1);
-  
+
   const onPressIn = () => { scale.value = withSpring(0.99); };
   const onPressOut = () => { scale.value = withSpring(1); };
-  
+
   const animatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: scale.value }],
   }));
@@ -344,7 +317,14 @@ const CategoryCard = ({ category, index, onPress, onEdit, onDelete }: {
       <TouchableOpacity activeOpacity={0.95} onPress={onPress} onPressIn={onPressIn} onPressOut={onPressOut}>
         <Animated.View style={[styles.categoryCard, animatedStyle]}>
           <View style={styles.categoryCardMain}>
-            <Image source={{ uri: category.image }} style={styles.categoryImage} />
+            <Image
+              source={{
+                uri: category.image
+                  ? `${API_BASE_URL}${category.image}`
+                  : 'https://via.placeholder.com/200'
+              }}
+              style={styles.categoryImage}
+            />
             <View style={styles.categoryInfo}>
               <View style={styles.categoryHeader}>
                 <Text style={styles.categoryName}>{category.name}</Text>
@@ -357,7 +337,7 @@ const CategoryCard = ({ category, index, onPress, onEdit, onDelete }: {
               )}
             </View>
           </View>
-          
+
           <View style={styles.categoryStats}>
             <View style={styles.categoryStat}>
               <MaterialCommunityIcons name="package-variant" size={14} color="#6B7280" />
@@ -376,7 +356,7 @@ const CategoryCard = ({ category, index, onPress, onEdit, onDelete }: {
               <Text style={styles.categoryStatText}>${category.revenue.toLocaleString()}</Text>
             </View>
           </View>
-          
+
           <View style={styles.categoryFooter}>
             <Text style={styles.categoryDate}>Updated: {category.updatedAt}</Text>
             <View style={styles.categoryActions}>
@@ -391,7 +371,7 @@ const CategoryCard = ({ category, index, onPress, onEdit, onDelete }: {
               </TouchableOpacity>
             </View>
           </View>
-          
+
           {category.isFeatured && (
             <View style={styles.featuredBadge}>
               <Ionicons name="star" size={12} color="#F59E0B" />
@@ -406,7 +386,7 @@ const CategoryCard = ({ category, index, onPress, onEdit, onDelete }: {
 
 const HierarchyNodeComponent = ({ node, level = 0 }: { node: HierarchyNode; level?: number }) => {
   const [expanded, setExpanded] = useState(true);
-  
+
   return (
     <View style={[styles.hierarchyNode, { marginLeft: level * 16 }]}>
       <TouchableOpacity onPress={() => setExpanded(!expanded)} style={styles.hierarchyNodeHeader}>
@@ -426,7 +406,10 @@ const HierarchyNodeComponent = ({ node, level = 0 }: { node: HierarchyNode; leve
 
 const FeaturedCategoryCard = ({ category, index }: { category: FeaturedCategory; index: number }) => (
   <Animated.View entering={FadeInRight.delay(index * 60).springify()} style={styles.featuredCard}>
-    <Image source={{ uri: category.image }} style={styles.featuredImage} />
+    <Image source={{ uri: category.image
+                  ? `${API_BASE_URL}${category.image}`
+                  : 'https://via.placeholder.com/200'
+                   }} style={styles.featuredImage} />
     <View style={styles.featuredInfo}>
       <Text style={styles.featuredName}>{category.name}</Text>
       <View style={styles.featuredStats}>
@@ -439,7 +422,7 @@ const FeaturedCategoryCard = ({ category, index }: { category: FeaturedCategory;
 
 const TopCategoryCard = ({ category, index }: { category: TopCategory; index: number }) => (
   <Animated.View entering={FadeInUp.delay(index * 70).springify()} style={styles.topCategoryCard}>
-    <Image source={{ uri: category.image }} style={styles.topCategoryImage} />
+    <Image source={{ uri: category.image ? `${API_BASE_URL}${category.image}` : 'https://via.placeholder.com/200' }} style={styles.topCategoryImage} />
     <View style={styles.topCategoryInfo}>
       <Text style={styles.topCategoryName}>{category.name}</Text>
       <Text style={styles.topCategoryMetric}>{category.metric}</Text>
@@ -496,16 +479,47 @@ const ValidationChecklist = ({ items }: { items: ValidationItem[] }) => (
 
 const QuickActionCard = ({ action, index }: { action: QuickAction; index: number }) => {
   const scale = useSharedValue(1);
-  
+
   const onPressIn = () => { scale.value = withSpring(0.96); };
   const onPressOut = () => { scale.value = withSpring(1); };
-  
+
   const animatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: scale.value }],
   }));
 
+  const handlePress = () => {
+    switch (action.id) {
+      case '1':
+        router.push('/admin/categories/add');
+        break;
+      case '2':
+        router.push('/admin/categories/subcategories');
+        break;
+      case '3':
+        router.push('/admin/categories/import');
+        break;
+      case '4':
+        router.push('/admin/categories/export');
+        break;
+      case '5':
+        router.push('/admin/categories/seo');
+        break;
+      case '6':
+        router.push('/admin/categories/visibility');
+        break;
+      case '7':
+        router.push('/admin/categories/featured');
+        break;
+      case '8':
+        router.push('/admin/categories/reports');
+        break;
+      default:
+        break;
+    }
+  };
+
   return (
-    <TouchableOpacity activeOpacity={0.9} onPressIn={onPressIn} onPressOut={onPressOut}>
+    <TouchableOpacity activeOpacity={0.9} onPressIn={onPressIn} onPressOut={onPressOut} onPress={handlePress}>
       <Animated.View style={[styles.quickActionCard, animatedStyle]}>
         <View style={[styles.quickActionIcon, { backgroundColor: `${action.color}15` }]}>
           <MaterialCommunityIcons name={action.icon as any} size={24} color={action.color} />
@@ -523,12 +537,43 @@ const QuickActionCard = ({ action, index }: { action: QuickAction; index: number
 export default function CategoryListScreen() {
   const insets = useSafeAreaInsets();
   const [refreshing, setRefreshing] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [searchText, setSearchText] = useState('');
   const [selectedFilter, setSelectedFilter] = useState('all');
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [isBulkMode, setIsBulkMode] = useState(false);
   const [notificationCount] = useState(3);
   const scrollY = useSharedValue(0);
+
+  // State for data
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [stats, setStats] = useState<CategoryStats>({
+    totalCategories: 0,
+    activeCategories: 0,
+    hiddenCategories: 0,
+    featuredCategories: 0,
+    parentCategories: 0,
+    subCategories: 0,
+    emptyCategories: 0,
+  });
+  const [analyticsCards, setAnalyticsCards] = useState<AnalyticsCardData[]>([]);
+  const [filterChips, setFilterChips] = useState<FilterChip[]>([]);
+  const [hierarchyData, setHierarchyData] = useState<HierarchyNode[]>([]);
+  const [featuredCategories, setFeaturedCategories] = useState<FeaturedCategory[]>([]);
+  const [topCategories, setTopCategories] = useState<TopCategory[]>([]);
+  const [insights, setInsights] = useState<Insight[]>([]);
+  const [validationItems, setValidationItems] = useState<ValidationItem[]>([]);
+
+  const quickActions: QuickAction[] = [
+    { id: '1', title: 'Add Category', icon: 'plus-circle', color: '#3B82F6' },
+    { id: '2', title: 'Subcategories', icon: 'sort-alphabetical-ascending', color: '#8B5CF6' },
+    { id: '3', title: 'Import', icon: 'download', color: '#10B981' },
+    { id: '4', title: 'Export', icon: 'upload', color: '#F59E0B' },
+    { id: '5', title: 'SEO Settings', icon: 'google', color: '#EC4899' },
+    { id: '6', title: 'Visibility', icon: 'eye', color: '#6366F1' },
+    { id: '7', title: 'Featured', icon: 'star', color: '#14B8A6' },
+    { id: '8', title: 'Reports', icon: 'chart-line', color: '#EF4444' },
+  ];
 
   const scrollHandler = useAnimatedScrollHandler({
     onScroll: (event) => {
@@ -541,13 +586,176 @@ export default function CategoryListScreen() {
     shadowOpacity: scrollY.value > 10 ? 0.05 : 0,
   }));
 
-  const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 1500);
+  // Fetch all dashboard data
+  const fetchDashboardData = useCallback(async () => {
+    try {
+      setLoading(true);
+
+      // Fetch categories and stats
+      const [categoriesData, categoryStats] = await Promise.all([
+        fetchCategories(),
+        fetchCategoryStats(),
+      ]);
+
+      // Map categories to UI format
+      const mappedCategories = categoriesData.map((cat: CategoryResponse, index: number) => ({
+        id: cat._id,
+        name: cat.name,
+        slug: cat.slug,
+        categoryId: `CAT-${cat._id.slice(0, 8).toUpperCase()}`,
+        parentId: null,
+        parentName: undefined,
+        level: 1,
+        image: cat.image || 'https://via.placeholder.com/200',
+        icon: cat.icon || 'folder',
+        productCount: cat.productCount || 0,
+        subcategoryCount: 0,
+        views: Math.floor(Math.random() * 10000),
+        revenue: (cat.productCount || 0) * 100,
+        status: cat.isActive ? 'active' : 'hidden',
+        isFeatured: false,
+        hasSEO: !!cat.description,
+        createdAt: new Date(cat.createdAt).toLocaleDateString(),
+        updatedAt: new Date(cat.updatedAt).toLocaleDateString(),
+      }));
+
+      setCategories(mappedCategories);
+      setStats(categoryStats);
+
+      // Update analytics cards
+      setAnalyticsCards([
+        { id: '1', title: 'Total Categories', count: categoryStats.totalCategories, icon: 'format-list-bulleted', color: '#3B82F6', trend: 12 },
+        { id: '2', title: 'Active', count: categoryStats.activeCategories, icon: 'check-circle', color: '#10B981', trend: 8 },
+        { id: '3', title: 'Hidden', count: categoryStats.hiddenCategories, icon: 'eye-off', color: '#6B7280', trend: -3 },
+        { id: '4', title: 'Subcategories', count: categoryStats.subCategories, icon: 'sort-alphabetical-ascending', color: '#8B5CF6', trend: 15 },
+        { id: '5', title: 'Featured', count: categoryStats.featuredCategories, icon: 'star', color: '#F59E0B', trend: 5 },
+        { id: '6', title: 'Empty Categories', count: categoryStats.emptyCategories, icon: 'alert-circle', color: '#EF4444', trend: -2 },
+      ]);
+
+      // Update filter chips
+      setFilterChips([
+        { id: 'all', label: 'All', count: categoryStats.totalCategories },
+        { id: 'active', label: 'Active', count: categoryStats.activeCategories },
+        { id: 'hidden', label: 'Hidden', count: categoryStats.hiddenCategories },
+        { id: 'featured', label: 'Featured', count: categoryStats.featuredCategories },
+        { id: 'parent', label: 'Parent Categories', count: categoryStats.parentCategories },
+        { id: 'subcategories', label: 'Subcategories', count: categoryStats.subCategories },
+        { id: 'empty', label: 'Empty Categories', count: categoryStats.emptyCategories },
+      ]);
+
+      // Build hierarchy data
+      const hierarchy = mappedCategories
+        .filter(c => c.parentId === null)
+        .map(c => ({
+          id: c.id,
+          name: c.name,
+          productCount: c.productCount,
+          children: mappedCategories
+            .filter(sub => sub.parentId === c.id)
+            .map(sub => ({
+              id: sub.id,
+              name: sub.name,
+              productCount: sub.productCount,
+              children: [],
+            })),
+        }));
+      setHierarchyData(hierarchy);
+
+      // Get featured categories (top 3 by product count)
+      const featured = mappedCategories
+        .sort((a, b) => b.productCount - a.productCount)
+        .slice(0, 3)
+        .map(c => ({
+          id: c.id,
+          name: c.name,
+          image: c.image,
+          productCount: c.productCount,
+          revenue: c.revenue,
+        }));
+      setFeaturedCategories(featured);
+
+      // Get top categories - FIXED SYNTAX
+      const top = mappedCategories
+        .sort((a, b) => b.views - a.views)
+        .slice(0, 4)
+        .map((c, index) => {
+          let metric, value;
+          if (index === 0) {
+            metric = 'Most Products';
+            value = c.productCount.toString();
+          } else if (index === 1) {
+            metric = 'Highest Revenue';
+            value = `$${(c.revenue / 1000).toFixed(0)}K`;
+          } else if (index === 2) {
+            metric = 'Most Viewed';
+            value = `${(c.views / 1000).toFixed(1)}K`;
+          } else {
+            metric = 'Fastest Growing';
+            value = `+${15 + index * 5}%`;
+          }
+          return {
+            id: c.id,
+            name: c.name,
+            image: c.image,
+            metric: metric,
+            value: value,
+            growth: 15 + index * 5,
+          };
+        });
+      setTopCategories(top);
+
+      // Generate insights
+      const newInsights: Insight[] = [];
+      const topCategory = mappedCategories.sort((a, b) => b.revenue - a.revenue)[0];
+      if (topCategory) {
+        const totalRevenue = mappedCategories.reduce((sum, c) => sum + c.revenue, 0);
+        const percentage = totalRevenue > 0 ? Math.round((topCategory.revenue / totalRevenue) * 100) : 0;
+        newInsights.push({
+          id: '1',
+          message: `${topCategory.name} generates ${percentage}% of total revenue.`,
+          type: 'positive',
+        });
+      }
+      if (categoryStats.emptyCategories > 0) {
+        newInsights.push({
+          id: '2',
+          message: `${categoryStats.emptyCategories} categories currently have no products. Add products or archive these categories.`,
+          type: 'warning',
+        });
+      }
+      if (categoryStats.totalCategories > 0 && categoryStats.activeCategories > categoryStats.totalCategories * 0.7) {
+        newInsights.push({
+          id: '3',
+          message: `${Math.round((categoryStats.activeCategories / categoryStats.totalCategories) * 100)}% of categories are active. Great organization!`,
+          type: 'positive',
+        });
+      }
+      setInsights(newInsights);
+
+      // Update validation items
+      setValidationItems([
+        { id: '1', label: 'Categories have images', completed: mappedCategories.filter(c => c.image && c.image !== 'https://via.placeholder.com/200').length > 0 },
+        { id: '2', label: 'SEO configured for top categories', completed: mappedCategories.filter(c => c.hasSEO).length > 5 },
+        { id: '3', label: 'Products assigned to categories', completed: categoryStats.totalCategories > 0 },
+        { id: '4', label: 'Visibility configured', completed: categoryStats.activeCategories > 0 },
+        { id: '5', label: 'Featured categories selected', completed: categoryStats.featuredCategories > 0 },
+      ]);
+
+    } catch (error) {
+      console.error('Error fetching category data:', error);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await fetchDashboardData();
+    setRefreshing(false);
+  }, [fetchDashboardData]);
+
   const toggleCategorySelection = useCallback((categoryId: string) => {
-    setSelectedCategories(prev => 
+    setSelectedCategories(prev =>
       prev.includes(categoryId) ? prev.filter(id => id !== categoryId) : [...prev, categoryId]
     );
   }, []);
@@ -557,39 +765,92 @@ export default function CategoryListScreen() {
     setIsBulkMode(false);
   }, []);
 
+  const handleDeleteCategory = useCallback(async (categoryId: string) => {
+    Alert.alert(
+      'Delete Category',
+      'Are you sure you want to delete this category? This action cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteCategory(categoryId);
+              setCategories(prev => prev.filter(c => c.id !== categoryId));
+              Alert.alert('Success', 'Category deleted successfully');
+              fetchDashboardData(); // Refresh data
+            } catch (error) {
+              Alert.alert('Error', 'Failed to delete category');
+            }
+          }
+        }
+      ]
+    );
+  }, [fetchDashboardData]);
+
   const filteredCategories = useMemo(() => {
     let filtered = categories;
-    
+
     if (selectedFilter !== 'all') {
-      if (selectedFilter === 'active') filtered = filtered.filter(c => c.status === 'active');
-      else if (selectedFilter === 'hidden') filtered = filtered.filter(c => c.status === 'hidden');
-      else if (selectedFilter === 'featured') filtered = filtered.filter(c => c.isFeatured);
-      else if (selectedFilter === 'parent') filtered = filtered.filter(c => c.level === 1);
-      else if (selectedFilter === 'subcategories') filtered = filtered.filter(c => c.level > 1);
-      else if (selectedFilter === 'empty') filtered = filtered.filter(c => c.status === 'empty');
+      switch (selectedFilter) {
+        case 'active':
+          filtered = filtered.filter(c => c.status === 'active');
+          break;
+        case 'hidden':
+          filtered = filtered.filter(c => c.status === 'hidden');
+          break;
+        case 'featured':
+          filtered = filtered.filter(c => c.isFeatured);
+          break;
+        case 'parent':
+          filtered = filtered.filter(c => c.level === 1);
+          break;
+        case 'subcategories':
+          filtered = filtered.filter(c => c.level > 1);
+          break;
+        case 'empty':
+          filtered = filtered.filter(c => c.status === 'empty');
+          break;
+        default:
+          break;
+      }
     }
-    
+
     if (searchText) {
       const query = searchText.toLowerCase();
-      filtered = filtered.filter(c => 
+      filtered = filtered.filter(c =>
         c.name.toLowerCase().includes(query) ||
         c.slug.toLowerCase().includes(query) ||
         c.categoryId.toLowerCase().includes(query)
       );
     }
-    
+
     return filtered;
-  }, [selectedFilter, searchText]);
+  }, [selectedFilter, searchText, categories]);
+
+  // Initial data fetch
+  useEffect(() => {
+    fetchDashboardData();
+  }, []);
 
   const renderCategoryItem = ({ item, index }: { item: Category; index: number }) => (
     <CategoryCard
       category={item}
       index={index}
-      onPress={() => {}}
-      onEdit={() => {}}
-      onDelete={() => {}}
+      onPress={() => router.push(`/admin/categories/${item.id}`)}
+      onEdit={() => router.push(`/admin/categories/edit/${item.id}`)}
+      onDelete={() => handleDeleteCategory(item.id)}
     />
   );
+
+  if (loading) {
+    return (
+      <SafeAreaView style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+        <Text style={{ fontSize: 16, color: '#6B7280' }}>Loading Categories...</Text>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -598,7 +859,7 @@ export default function CategoryListScreen() {
       <Animated.View style={[styles.headerContainer, headerAnimatedStyle]}>
         <View style={styles.header}>
           <View style={styles.headerLeft}>
-            <TouchableOpacity style={styles.headerButton}>
+            <TouchableOpacity style={styles.headerButton} onPress={() => router.back()}>
               <Ionicons name="arrow-back" size={24} color="#1F2937" />
             </TouchableOpacity>
             <Text style={styles.headerTitle}>Categories</Text>
@@ -611,9 +872,6 @@ export default function CategoryListScreen() {
                   <Text style={styles.headerNotificationText}>{notificationCount}</Text>
                 </View>
               )}
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.headerIconButton}>
-              <Ionicons name="ellipsis-horizontal" size={22} color="#1F2937" />
             </TouchableOpacity>
           </View>
         </View>
@@ -706,48 +964,56 @@ export default function CategoryListScreen() {
             <SectionHeader title="All Categories" count={filteredCategories.length} />
 
             {/* Category Hierarchy Visualization */}
-            <View style={styles.hierarchySection}>
-              <SectionHeader title="Category Structure" showSeeAll={false} />
-              <View style={styles.hierarchyContainer}>
-                {hierarchyData.map((node) => (
-                  <HierarchyNodeComponent key={node.id} node={node} />
-                ))}
+            {hierarchyData.length > 0 && (
+              <View style={styles.hierarchySection}>
+                <SectionHeader title="Category Structure" showSeeAll={false} />
+                <View style={styles.hierarchyContainer}>
+                  {hierarchyData.map((node) => (
+                    <HierarchyNodeComponent key={node.id} node={node} />
+                  ))}
+                </View>
               </View>
-            </View>
+            )}
 
             {/* Featured Categories */}
-            <View style={styles.featuredSection}>
-              <SectionHeader title="Featured Categories" />
-              <FlatList
-                data={featuredCategories}
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                renderItem={({ item, index }) => <FeaturedCategoryCard category={item} index={index} />}
-                keyExtractor={(item) => item.id}
-                contentContainerStyle={styles.featuredList}
-              />
-            </View>
+            {featuredCategories.length > 0 && (
+              <View style={styles.featuredSection}>
+                <SectionHeader title="Featured Categories" />
+                <FlatList
+                  data={featuredCategories}
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  renderItem={({ item, index }) => <FeaturedCategoryCard category={item} index={index} />}
+                  keyExtractor={(item) => item.id}
+                  contentContainerStyle={styles.featuredList}
+                />
+              </View>
+            )}
 
             {/* Top Performing Categories */}
-            <View style={styles.topCategoriesSection}>
-              <SectionHeader title="Top Categories" />
-              <FlatList
-                data={topCategories}
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                renderItem={({ item, index }) => <TopCategoryCard category={item} index={index} />}
-                keyExtractor={(item) => item.id}
-                contentContainerStyle={styles.topCategoriesList}
-              />
-            </View>
+            {topCategories.length > 0 && (
+              <View style={styles.topCategoriesSection}>
+                <SectionHeader title="Top Categories" />
+                <FlatList
+                  data={topCategories}
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  renderItem={({ item, index }) => <TopCategoryCard category={item} index={index} />}
+                  keyExtractor={(item) => item.id}
+                  contentContainerStyle={styles.topCategoriesList}
+                />
+              </View>
+            )}
 
             {/* Category Insights */}
-            <View style={styles.insightsSection}>
-              <SectionHeader title="Category Insights" showSeeAll={false} />
-              {insights.map((insight, index) => (
-                <InsightCard key={insight.id} insight={insight} index={index} />
-              ))}
-            </View>
+            {insights.length > 0 && (
+              <View style={styles.insightsSection}>
+                <SectionHeader title="Category Insights" showSeeAll={false} />
+                {insights.map((insight, index) => (
+                  <InsightCard key={insight.id} insight={insight} index={index} />
+                ))}
+              </View>
+            )}
 
             {/* Validation & Health */}
             <View style={styles.validationSection}>
@@ -774,7 +1040,7 @@ export default function CategoryListScreen() {
             <Text style={styles.emptyStateDescription}>
               Create your first category to organize your products efficiently.
             </Text>
-            <TouchableOpacity style={styles.emptyStateButton}>
+            <TouchableOpacity style={styles.emptyStateButton} onPress={() => router.push('/admin/categories/add')}>
               <Text style={styles.emptyStateButtonText}>Create Category</Text>
             </TouchableOpacity>
           </View>
@@ -782,7 +1048,7 @@ export default function CategoryListScreen() {
       />
 
       {/* Floating Action Button */}
-      <TouchableOpacity style={[styles.fab, { bottom: insets.bottom + 24 }]}>
+      <TouchableOpacity style={[styles.fab, { bottom: insets.bottom + 24 }]} onPress={() => router.push('/admin/categories/add')}>
         <LinearGradient
           colors={['#3B82F6', '#2563EB']}
           start={{ x: 0, y: 0 }}

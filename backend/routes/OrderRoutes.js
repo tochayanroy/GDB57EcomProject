@@ -1,906 +1,1097 @@
 const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
-const passport = require("passport");
 const Order = require("../modules/OrderSchema");
 const Product = require("../modules/ProductSchema");
 const User = require("../modules/UserSchema");
 const Cart = require("../modules/CartSchema");
+const Payment = require("../modules/PaymentSchema");
+const passport = require("passport");
+const { v4: uuidv4 } = require("uuid");
 
 // ==============================
-// MIDDLEWARE
+// 📦 ORDER ROUTES (Protected - User)
 // ==============================
 
-const authorizeAdmin = (req, res, next) => {
+// 🛒 CREATE ORDER FROM CART
+router.post("/create", passport.authenticate("jwt", { session: false }), async (req, res) => {
     try {
-        if (!req.user) {
-            return res.status(401).json({ 
-                success: false, 
-                message: "Authentication required" 
+        const { 
+            addressId, 
+            paymentMethod, 
+            couponCode,
+            notes 
+        } = req.body;
+
+        // Validation
+        if (!addressId || !paymentMethod) {
+            return res.status(400).json({
+                success: false,
+                message: "Address ID and payment method are required"
             });
         }
-        
-        if (req.user.role !== "admin") {
-            return res.status(403).json({ 
-                success: false, 
-                message: "Admin access required" 
+
+        // Get user with cart items
+        const user = await User.findById(req.user._id)
+            .populate({
+                path: "cart",
+                populate: {
+                    path: "product",
+                    select: "name price discountPrice stock shippingCharge"
+                }
+            });
+
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found"
             });
         }
-        
-        next();
+
+        // Get user's cart
+        const cartItems = await Cart.find({ user: req.user._id })
+            .populate("product");
+
+        if (!cartItems || cartItems.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Cart is empty"
+            });
+        }
+
+        // Get address from user
+        const address = user.addresses.id(addressId);
+        if (!address) {
+            return res.status(404).json({
+                success: false,
+                message: "Address not found"
+            });
+        }
+
+        // Generate order ID
+        const orderId = "ORD-" + Date.now().toString().slice(-8) + "-" + uuidv4().slice(0, 6).toUpperCase();
+
+        // Calculate totals
+        let subtotal = 0;
+        let totalDiscount = 0;
+        let totalShipping = 0;
+        const orderItems = [];
+
+        // Process each cart item
+        for (const cartItem of cartItems) {
+            const product = cartItem.product;
+            
+            // Check stock
+            if (product.stock < cartItem.quantity) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Not enough stock for ${product.name}. Available: ${product.stock}`
+                });
+            }
+
+            // Calculate item price
+            const itemPrice = product.discountPrice > 0 ? product.discountPrice : product.price;
+            const itemTotal = itemPrice * cartItem.quantity;
+            
+            // Create order item
+            orderItems.push({
+                product: product._id,
+                variant: cartItem.variant || null,
+                quantity: cartItem.quantity,
+                price: itemPrice,
+                discountPrice: product.discountPrice || 0,
+                totalPrice: itemTotal
+            });
+
+            subtotal += itemTotal;
+            totalShipping += product.shippingCharge || 0;
+
+            // Update product stock
+            product.stock -= cartItem.quantity;
+            product.soldCount = (product.soldCount || 0) + cartItem.quantity;
+            await product.save();
+        }
+
+        // Apply coupon discount if provided
+        let couponDiscount = 0;
+        if (couponCode) {
+            // TODO: Implement coupon validation
+            // For now, just a placeholder
+            couponDiscount = 0;
+        }
+
+        // Calculate total
+        const totalAmount = subtotal + totalShipping - couponDiscount;
+
+        // Create order
+        const order = await Order.create({
+            orderId,
+            user: req.user._id,
+            product: orderItems[0].product, // First product as main
+            variant: orderItems[0].variant,
+            quantity: orderItems.reduce((sum, item) => sum + item.quantity, 0),
+            price: orderItems[0].price,
+            discountPrice: orderItems[0].discountPrice,
+            totalPrice: totalAmount,
+            shippingCharge: totalShipping,
+            coupon: couponCode ? {
+                code: couponCode,
+                discountAmount: couponDiscount
+            } : null,
+            payment: {
+                method: paymentMethod,
+                status: paymentMethod === "COD" ? "pending" : "pending"
+            },
+            addresses: [address],
+            status: "pending",
+            notes: notes || ""
+        });
+
+        // Add order to user's orders
+        user.orders.push(order._id);
+        await user.save();
+
+        // Clear user's cart after order creation
+        await Cart.deleteMany({ user: req.user._id });
+
+        // If payment method is online, create payment record
+        if (paymentMethod !== "COD") {
+            const payment = await Payment.create({
+                order: order._id,
+                user: req.user._id,
+                amount: totalAmount,
+                method: paymentMethod,
+                status: "pending"
+            });
+            
+            // Update order with payment reference
+            order.payment.transactionId = payment._id;
+            await order.save();
+        }
+
+        res.status(201).json({
+            success: true,
+            message: "Order created successfully",
+            data: {
+                order,
+                orderItems,
+                summary: {
+                    subtotal,
+                    shipping: totalShipping,
+                    couponDiscount,
+                    total: totalAmount
+                }
+            }
+        });
+
     } catch (error) {
-        res.status(500).json({ 
-            success: false, 
-            message: "Server error during authorization" 
+        res.status(500).json({
+            success: false,
+            message: error.message
         });
     }
-};
+});
 
-module.exports = authorizeAdmin;
+// 🛒 CREATE ORDER DIRECTLY (Single Product)
+router.post("/create-direct", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const {
+            productId,
+            quantity = 1,
+            variant,
+            addressId,
+            paymentMethod,
+            couponCode,
+            notes
+        } = req.body;
 
-// Generate unique order ID
-const generateOrderId = () => {
-	const prefix = "ORD";
-	const timestamp = Date.now().toString().slice(-8);
-	const random = Math.floor(Math.random() * 10000).toString().padStart(4, "0");
-	return `${prefix}${timestamp}${random}`;
-};
+        // Validation
+        if (!productId || !addressId || !paymentMethod) {
+            return res.status(400).json({
+                success: false,
+                message: "Product ID, address, and payment method are required"
+            });
+        }
 
-// ==============================
-// 📋 USER ROUTES (Authenticated users only)
-// ==============================
+        // Get user
+        const user = await User.findById(req.user._id);
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found"
+            });
+        }
 
-// Get user's orders
+        // Get product
+        const product = await Product.findById(productId);
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: "Product not found"
+            });
+        }
+
+        // Check stock
+        if (product.stock < quantity) {
+            return res.status(400).json({
+                success: false,
+                message: `Not enough stock. Available: ${product.stock}`
+            });
+        }
+
+        // Get address
+        const address = user.addresses.id(addressId);
+        if (!address) {
+            return res.status(404).json({
+                success: false,
+                message: "Address not found"
+            });
+        }
+
+        // Calculate prices
+        const itemPrice = product.discountPrice > 0 ? product.discountPrice : product.price;
+        const totalPrice = itemPrice * quantity;
+        const shippingCharge = product.shippingCharge || 0;
+
+        // Generate order ID
+        const orderId = "ORD-" + Date.now().toString().slice(-8) + "-" + uuidv4().slice(0, 6).toUpperCase();
+
+        // Create order
+        const order = await Order.create({
+            orderId,
+            user: req.user._id,
+            product: product._id,
+            variant: variant || null,
+            quantity,
+            price: itemPrice,
+            discountPrice: product.discountPrice || 0,
+            totalPrice: totalPrice + shippingCharge,
+            shippingCharge,
+            payment: {
+                method: paymentMethod,
+                status: "pending"
+            },
+            addresses: [address],
+            status: "pending",
+            notes: notes || ""
+        });
+
+        // Update product stock
+        product.stock -= quantity;
+        product.soldCount = (product.soldCount || 0) + quantity;
+        await product.save();
+
+        // Add order to user
+        user.orders.push(order._id);
+        await user.save();
+
+        // Create payment if online
+        if (paymentMethod !== "COD") {
+            const payment = await Payment.create({
+                order: order._id,
+                user: req.user._id,
+                amount: totalPrice + shippingCharge,
+                method: paymentMethod,
+                status: "pending"
+            });
+            
+            order.payment.transactionId = payment._id;
+            await order.save();
+        }
+
+        res.status(201).json({
+            success: true,
+            message: "Order created successfully",
+            data: {
+                order,
+                summary: {
+                    subtotal: totalPrice,
+                    shipping: shippingCharge,
+                    total: totalPrice + shippingCharge
+                }
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 📥 GET USER ORDERS
 router.get("/my-orders", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		const {
-			page = 1,
-			limit = 10,
-			sort = "-createdAt",
-			status
-		} = req.query;
+    try {
+        const { 
+            page = 1, 
+            limit = 10, 
+            status,
+            sort = "-createdAt"
+        } = req.query;
 
-		const query = { user: userId };
-		if (status) query.status = status;
+        const filter = { user: req.user._id };
+        if (status) filter.status = status;
 
-		const orders = await Order.find(query)
-			.populate("product", "name slug thumbnail images brand")
-			.sort(sort)
-			.limit(limit * 1)
-			.skip((page - 1) * limit)
-			.lean();
+        const pageNum = parseInt(page);
+        const limitNum = parseInt(limit);
+        const skip = (pageNum - 1) * limitNum;
 
-		const total = await Order.countDocuments(query);
+        const orders = await Order.find(filter)
+            .populate("product", "name images thumbnail")
+            .sort(sort)
+            .skip(skip)
+            .limit(limitNum);
 
-		// Calculate order summaries
-		const ordersWithSummary = orders.map(order => ({
-			...order,
-			itemCount: 1, // Each order document represents one product
-			orderStatus: order.status,
-			paymentStatus: order.payment.status,
-			trackingInfo: order.shipping.trackingNumber ? {
-				trackingNumber: order.shipping.trackingNumber,
-				carrier: order.shipping.carrier,
-				status: order.status
-			} : null
-		}));
+        const total = await Order.countDocuments(filter);
 
-		res.json({
-			success: true,
-			data: {
-				orders: ordersWithSummary,
-				pagination: {
-					page: parseInt(page),
-					limit: parseInt(limit),
-					total,
-					pages: Math.ceil(total / limit)
-				}
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        res.json({
+            success: true,
+            data: orders,
+            pagination: {
+                page: pageNum,
+                limit: limitNum,
+                total,
+                pages: Math.ceil(total / limitNum)
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Get single order by ID
-router.get("/:orderId", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { orderId } = req.params;
-		const userId = req.user._id;
-		const userRole = req.user.role;
+// 📄 GET SINGLE ORDER
+router.get("/:id", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const order = await Order.findById(req.params.id)
+            .populate("product", "name images thumbnail brand")
+            .populate("user", "name email phone");
 
-		let query = { _id: orderId };
-		
-		// If not admin, restrict to user's own orders
-		if (userRole !== "admin") {
-			query.user = userId;
-		}
+        if (!order) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found"
+            });
+        }
 
-		const order = await Order.findOne(query)
-			.populate("product", "name slug description price discountPrice thumbnail images brand category")
-			.populate("user", "name email phone")
-			.lean();
+        // Check if user owns the order or is admin
+        if (order.user._id.toString() !== req.user._id.toString() && req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "You can only view your own orders"
+            });
+        }
 
-		if (!order) {
-			return res.status(404).json({ success: false, message: "Order not found" });
-		}
+        res.json({
+            success: true,
+            data: order
+        });
 
-		// Calculate timeline
-		const timeline = [];
-		if (order.createdAt) timeline.push({ status: "Order Placed", date: order.createdAt, completed: true });
-		if (order.status === "confirmed" || order.status === "processing" || order.status === "shipped" || order.status === "delivered") {
-			timeline.push({ status: "Order Confirmed", date: order.updatedAt, completed: true });
-		}
-		if (order.shipping.shippedAt) {
-			timeline.push({ status: "Shipped", date: order.shipping.shippedAt, completed: true });
-		}
-		if (order.shipping.deliveredAt) {
-			timeline.push({ status: "Delivered", date: order.shipping.deliveredAt, completed: true });
-		}
-		if (order.status === "cancelled") {
-			timeline.push({ status: "Cancelled", date: order.updatedAt, completed: true });
-		}
-
-		res.json({
-			success: true,
-			data: {
-				...order,
-				timeline,
-				canCancel: ["pending", "confirmed"].includes(order.status),
-				canReturn: order.status === "delivered" && !order.refund.status !== "completed",
-				returnWindow: order.status === "delivered" ? 
-					Math.max(0, 7 - Math.floor((Date.now() - new Date(order.shipping.deliveredAt).getTime()) / (1000 * 60 * 60 * 24))) : 0
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Get order by custom order ID
-router.get("/by-order-id/:orderId", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { orderId } = req.params;
-		const userId = req.user._id;
-		const userRole = req.user.role;
+// 🔄 CANCEL ORDER
+router.put("/:id/cancel", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const { reason } = req.body;
+        const order = await Order.findById(req.params.id);
 
-		let query = { orderId };
-		if (userRole !== "admin") {
-			query.user = userId;
-		}
+        if (!order) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found"
+            });
+        }
 
-		const order = await Order.findOne(query)
-			.populate("product", "name slug thumbnail price")
-			.lean();
+        // Check if user owns the order
+        if (order.user.toString() !== req.user._id.toString()) {
+            return res.status(403).json({
+                success: false,
+                message: "You can only cancel your own orders"
+            });
+        }
 
-		if (!order) {
-			return res.status(404).json({ success: false, message: "Order not found" });
-		}
+        // Check if order can be cancelled
+        if (!["pending", "confirmed"].includes(order.status)) {
+            return res.status(400).json({
+                success: false,
+                message: `Order cannot be cancelled in ${order.status} status`
+            });
+        }
 
-		res.json({ success: true, data: order });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        // Restore product stock
+        const product = await Product.findById(order.product);
+        if (product) {
+            product.stock += order.quantity;
+            product.soldCount = Math.max(0, (product.soldCount || 0) - order.quantity);
+            await product.save();
+        }
+
+        // Update order status
+        order.status = "cancelled";
+        order.notes = reason || "Cancelled by user";
+        await order.save();
+
+        // If payment was made, process refund
+        if (order.payment.status === "paid") {
+            // TODO: Implement refund logic
+            order.payment.status = "refunded";
+            await order.save();
+        }
+
+        res.json({
+            success: true,
+            message: "Order cancelled successfully",
+            data: order
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Create new order from cart
-router.post("/create", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		const {
-			address,
-			paymentMethod,
-			couponCode,
-			notes
-		} = req.body;
+// 🔄 RETURN ORDER
+router.put("/:id/return", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const { reason } = req.body;
+        const order = await Order.findById(req.params.id);
 
-		// Validate required fields
-		if (!address || !paymentMethod) {
-			return res.status(400).json({
-				success: false,
-				message: "Shipping address and payment method are required"
-			});
-		}
+        if (!order) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found"
+            });
+        }
 
-		// Get user's cart items
-		const cartItems = await Cart.find({ user: userId }).populate("product");
+        // Check if user owns the order
+        if (order.user.toString() !== req.user._id.toString()) {
+            return res.status(403).json({
+                success: false,
+                message: "You can only return your own orders"
+            });
+        }
 
-		if (!cartItems || cartItems.length === 0) {
-			return res.status(400).json({ success: false, message: "Cart is empty" });
-		}
+        // Check if order can be returned
+        if (order.status !== "delivered") {
+            return res.status(400).json({
+                success: false,
+                message: "Only delivered orders can be returned"
+            });
+        }
 
-		// Validate stock and calculate totals
-		let subtotal = 0;
-		let totalShipping = 0;
-		let totalDiscount = 0;
-		const validatedItems = [];
+        // Check if return already requested
+        if (order.refund.status !== "none") {
+            return res.status(400).json({
+                success: false,
+                message: "Return already requested for this order"
+            });
+        }
 
-		for (const item of cartItems) {
-			const product = item.product;
-			
-			if (!product || !product.isActive) {
-				return res.status(400).json({
-					success: false,
-					message: `Product ${product?.name || "Unknown"} is no longer available`
-				});
-			}
+        // Update order refund status
+        order.refund.status = "requested";
+        order.refund.reason = reason || "Return requested by user";
+        order.status = "returned";
+        await order.save();
 
-			if (product.stock < item.quantity) {
-				return res.status(400).json({
-					success: false,
-					message: `Only ${product.stock} items available for ${product.name}`
-				});
-			}
+        res.json({
+            success: true,
+            message: "Return requested successfully",
+            data: order
+        });
 
-			const currentPrice = product.discountPrice && product.discountPrice > 0 
-				? product.discountPrice 
-				: product.price;
-			const totalPrice = currentPrice * item.quantity;
-			
-			subtotal += totalPrice;
-			totalShipping += product.shippingCharge || 0;
-			totalDiscount += product.discountPrice || 0;
-
-			validatedItems.push({
-				product: product._id,
-				variant: item.variant,
-				quantity: item.quantity,
-				price: currentPrice,
-				discountPrice: product.discountPrice || 0,
-				totalPrice,
-				shippingCharge: product.shippingCharge || 0
-			});
-		}
-
-		// Apply coupon if provided
-		let couponDiscount = 0;
-		let appliedCoupon = null;
-		
-		if (couponCode) {
-			// TODO: Implement actual coupon validation
-			const validCoupons = {
-				"SAVE10": { discount: 10, type: "percentage", minOrder: 500 },
-				"SAVE20": { discount: 20, type: "percentage", minOrder: 1000 }
-			};
-			
-			const coupon = validCoupons[couponCode.toUpperCase()];
-			if (coupon && subtotal >= coupon.minOrder) {
-				if (coupon.type === "percentage") {
-					couponDiscount = (subtotal * coupon.discount) / 100;
-				} else {
-					couponDiscount = coupon.discount;
-				}
-				appliedCoupon = { code: couponCode.toUpperCase(), discountAmount: couponDiscount };
-			}
-		}
-
-		const grandTotal = subtotal + totalShipping - couponDiscount;
-
-		// Create orders for each cart item
-		const createdOrders = [];
-		
-		for (const item of validatedItems) {
-			const orderId = generateOrderId();
-			
-			const order = await Order.create({
-				product: item.product,
-				variant: item.variant,
-				quantity: item.quantity,
-				price: item.price,
-				discountPrice: item.discountPrice,
-				totalPrice: item.totalPrice,
-				orderId,
-				user: userId,
-				shippingCharge: item.shippingCharge,
-				coupon: appliedCoupon,
-				payment: {
-					method: paymentMethod,
-					status: paymentMethod === "COD" ? "pending" : "pending",
-					transactionId: null,
-					paidAt: null
-				},
-				addresses: [address],
-				shipping: {
-					method: "standard",
-					trackingNumber: null,
-					carrier: null,
-					shippedAt: null,
-					deliveredAt: null
-				},
-				status: "pending",
-				notes: notes || "",
-				isPaid: paymentMethod === "COD" ? false : false,
-				isDelivered: false
-			});
-
-			// Update product stock
-			await Product.findByIdAndUpdate(item.product, {
-				$inc: { stock: -item.quantity, soldCount: item.quantity }
-			});
-
-			createdOrders.push(order);
-		}
-
-		// Clear user's cart
-		await Cart.deleteMany({ user: userId });
-		await User.findByIdAndUpdate(userId, { cart: null });
-
-		// Add orders to user's orders array
-		const orderIds = createdOrders.map(order => order._id);
-		await User.findByIdAndUpdate(userId, {
-			$push: { orders: { $each: orderIds } }
-		});
-
-		res.status(201).json({
-			success: true,
-			message: `${createdOrders.length} order(s) created successfully`,
-			data: {
-				orders: createdOrders,
-				summary: {
-					subtotal,
-					shipping: totalShipping,
-					couponDiscount,
-					grandTotal,
-					itemCount: validatedItems.length
-				}
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Cancel order
-router.post("/:orderId/cancel", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { orderId } = req.params;
-		const userId = req.user._id;
-		const { reason } = req.body;
+// 📊 GET ORDER SUMMARY
+router.get("/summary", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const orders = await Order.find({ user: req.user._id });
+        
+        const summary = {
+            totalOrders: orders.length,
+            pending: orders.filter(o => o.status === "pending").length,
+            confirmed: orders.filter(o => o.status === "confirmed").length,
+            processing: orders.filter(o => o.status === "processing").length,
+            shipped: orders.filter(o => o.status === "shipped").length,
+            delivered: orders.filter(o => o.status === "delivered").length,
+            cancelled: orders.filter(o => o.status === "cancelled").length,
+            returned: orders.filter(o => o.status === "returned").length,
+            totalSpent: orders.reduce((sum, o) => sum + o.totalPrice, 0),
+            lastOrder: orders.length > 0 ? orders[orders.length - 1].createdAt : null
+        };
 
-		const order = await Order.findOne({ _id: orderId, user: userId });
+        res.json({
+            success: true,
+            data: summary
+        });
 
-		if (!order) {
-			return res.status(404).json({ success: false, message: "Order not found" });
-		}
-
-		// Check if order can be cancelled
-		if (!["pending", "confirmed"].includes(order.status)) {
-			return res.status(400).json({
-				success: false,
-				message: `Order cannot be cancelled. Current status: ${order.status}`
-			});
-		}
-
-		// Restore product stock
-		await Product.findByIdAndUpdate(order.product, {
-			$inc: { stock: order.quantity, soldCount: -order.quantity }
-		});
-
-		order.status = "cancelled";
-		order.notes = reason ? `Cancelled: ${reason}` : order.notes;
-		
-		if (order.payment.status === "paid") {
-			order.payment.status = "refunded";
-			order.refund.status = "completed";
-			order.refund.amount = order.totalPrice;
-		}
-
-		await order.save();
-
-		res.json({
-			success: true,
-			message: "Order cancelled successfully",
-			data: order
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Request return/refund
-router.post("/:orderId/return", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { orderId } = req.params;
-		const userId = req.user._id;
-		const { reason } = req.body;
-
-		if (!reason) {
-			return res.status(400).json({ success: false, message: "Return reason is required" });
-		}
-
-		const order = await Order.findOne({ _id: orderId, user: userId });
-
-		if (!order) {
-			return res.status(404).json({ success: false, message: "Order not found" });
-		}
-
-		// Check if order is delivered and within return window
-		if (order.status !== "delivered") {
-			return res.status(400).json({
-				success: false,
-				message: "Only delivered orders can be returned"
-			});
-		}
-
-		// Check if already requested
-		if (order.refund.status !== "none") {
-			return res.status(400).json({
-				success: false,
-				message: `Return already ${order.refund.status}`
-			});
-		}
-
-		order.refund.status = "requested";
-		order.refund.reason = reason;
-		order.refund.amount = order.totalPrice;
-		order.status = "returned";
-		
-		await order.save();
-
-		res.json({
-			success: true,
-			message: "Return request submitted successfully",
-			data: order
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Track order
-router.get("/:orderId/track", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { orderId } = req.params;
-		const userId = req.user._id;
-
-		const order = await Order.findOne({ _id: orderId, user: userId })
-			.populate("product", "name thumbnail")
-			.lean();
-
-		if (!order) {
-			return res.status(404).json({ success: false, message: "Order not found" });
-		}
-
-		const trackingSteps = [
-			{ step: "Order Placed", status: "completed", date: order.createdAt, description: "Your order has been placed successfully" },
-			{ step: "Order Confirmed", status: order.status !== "pending" ? "completed" : "pending", date: order.status !== "pending" ? order.updatedAt : null, description: "Your order has been confirmed" },
-			{ step: "Processing", status: ["processing", "shipped", "delivered"].includes(order.status) ? "completed" : "pending", date: ["processing", "shipped", "delivered"].includes(order.status) ? order.updatedAt : null, description: "Your order is being processed" },
-			{ step: "Shipped", status: order.shipping.shippedAt ? "completed" : "pending", date: order.shipping.shippedAt, description: order.shipping.trackingNumber ? `Tracking: ${order.shipping.trackingNumber}` : "Your order has been shipped" },
-			{ step: "Out for Delivery", status: order.shipping.deliveredAt ? "completed" : order.shipping.shippedAt ? "active" : "pending", date: null, description: "Your order is out for delivery" },
-			{ step: "Delivered", status: order.shipping.deliveredAt ? "completed" : "pending", date: order.shipping.deliveredAt, description: "Your order has been delivered" }
-		];
-
-		if (order.status === "cancelled") {
-			trackingSteps.push({ step: "Cancelled", status: "cancelled", date: order.updatedAt, description: "Your order has been cancelled" });
-		}
-
-		res.json({
-			success: true,
-			data: {
-				orderId: order.orderId,
-				product: order.product,
-				status: order.status,
-				trackingSteps,
-				trackingNumber: order.shipping.trackingNumber,
-				carrier: order.shipping.carrier,
-				estimatedDelivery: order.shipping.shippedAt ? 
-					new Date(new Date(order.shipping.shippedAt).getTime() + 7 * 24 * 60 * 60 * 1000) : null
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Download order invoice
-router.get("/:orderId/invoice", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { orderId } = req.params;
-		const userId = req.user._id;
-
-		const order = await Order.findOne({ _id: orderId, user: userId })
-			.populate("product", "name sku brand")
-			.lean();
-
-		if (!order) {
-			return res.status(404).json({ success: false, message: "Order not found" });
-		}
-
-		// Generate invoice data (in a real app, you'd generate PDF)
-		const invoice = {
-			invoiceNumber: `INV-${order.orderId}`,
-			orderId: order.orderId,
-			date: order.createdAt,
-			customer: {
-				name: order.shippingAddress.fullName,
-				email: req.user.email,
-				phone: order.shippingAddress.phone,
-				address: `${order.shippingAddress.addressLine}, ${order.shippingAddress.city}, ${order.shippingAddress.state} - ${order.shippingAddress.pincode}`
-			},
-			items: [{
-				product: order.product.name,
-				quantity: order.quantity,
-				price: order.price,
-				total: order.totalPrice
-			}],
-			subtotal: order.totalPrice,
-			shipping: order.shippingCharge,
-			couponDiscount: order.coupon?.discountAmount || 0,
-			grandTotal: order.totalPrice + order.shippingCharge - (order.coupon?.discountAmount || 0),
-			paymentMethod: order.payment.method,
-			paymentStatus: order.payment.status
-		};
-
-		res.json({
-			success: true,
-			data: invoice
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Get order statistics for user
-router.get("/stats/my-stats", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-
-		const stats = await Order.aggregate([
-			{ $match: { user: userId } },
-			{
-				$group: {
-					_id: null,
-					totalOrders: { $sum: 1 },
-					totalSpent: { $sum: { $add: ["$totalPrice", "$shippingCharge"] } },
-					totalItems: { $sum: "$quantity" },
-					completedOrders: { $sum: { $cond: [{ $eq: ["$status", "delivered"] }, 1, 0] } },
-					cancelledOrders: { $sum: { $cond: [{ $eq: ["$status", "cancelled"] }, 1, 0] } },
-					pendingOrders: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } }
-				}
-			}
-		]);
-
-		const recentOrders = await Order.find({ user: userId })
-			.sort("-createdAt")
-			.limit(5)
-			.populate("product", "name thumbnail")
-			.lean();
-
-		res.json({
-			success: true,
-			data: {
-				stats: stats[0] || {
-					totalOrders: 0,
-					totalSpent: 0,
-					totalItems: 0,
-					completedOrders: 0,
-					cancelledOrders: 0,
-					pendingOrders: 0
-				},
-				recentOrders
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
 // ==============================
-// 🔐 ADMIN ROUTES
+// 👑 ADMIN ORDER ROUTES
 // ==============================
 
-// Get all orders (Admin only)
-router.get("/admin/all", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const {
-			page = 1,
-			limit = 20,
-			sort = "-createdAt",
-			status,
-			paymentStatus,
-			fromDate,
-			toDate,
-			search
-		} = req.query;
+// 📥 GET ALL ORDERS (Admin Only)
+router.get("/admin/orders", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		const query = {};
+        const {
+            page = 1,
+            limit = 20,
+            status,
+            search,
+            dateFrom,
+            dateTo,
+            sort = "-createdAt"
+        } = req.query;
 
-		if (status) query.status = status;
-		if (paymentStatus) query["payment.status"] = paymentStatus;
-		if (fromDate || toDate) {
-			query.createdAt = {};
-			if (fromDate) query.createdAt.$gte = new Date(fromDate);
-			if (toDate) query.createdAt.$lte = new Date(toDate);
-		}
-		if (search) {
-			query.$or = [
-				{ orderId: { $regex: search, $options: "i" } },
-				{ "shippingAddress.fullName": { $regex: search, $options: "i" } },
-				{ "shippingAddress.phone": { $regex: search, $options: "i" } }
-			];
-		}
+        const filter = {};
 
-		const orders = await Order.find(query)
-			.populate("product", "name slug thumbnail")
-			.populate("user", "name email phone")
-			.sort(sort)
-			.limit(limit * 1)
-			.skip((page - 1) * limit)
-			.lean();
+        if (status) filter.status = status;
+        if (search) {
+            filter.$or = [
+                { orderId: { $regex: search, $options: "i" } },
+                { "addresses.fullName": { $regex: search, $options: "i" } },
+                { "addresses.phone": { $regex: search, $options: "i" } }
+            ];
+        }
+        if (dateFrom || dateTo) {
+            filter.createdAt = {};
+            if (dateFrom) filter.createdAt.$gte = new Date(dateFrom);
+            if (dateTo) filter.createdAt.$lte = new Date(dateTo);
+        }
 
-		const total = await Order.countDocuments(query);
+        const pageNum = parseInt(page);
+        const limitNum = parseInt(limit);
+        const skip = (pageNum - 1) * limitNum;
 
-		// Calculate summary
-		const summary = await Order.aggregate([
-			{ $match: query },
-			{
-				$group: {
-					_id: null,
-					totalOrders: { $sum: 1 },
-					totalRevenue: { $sum: { $add: ["$totalPrice", "$shippingCharge"] } },
-					totalItems: { $sum: "$quantity" },
-					pendingOrders: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } },
-					processingOrders: { $sum: { $cond: [{ $in: ["$status", ["confirmed", "processing", "shipped"]] }, 1, 0] } },
-					deliveredOrders: { $sum: { $cond: [{ $eq: ["$status", "delivered"] }, 1, 0] } },
-					cancelledOrders: { $sum: { $cond: [{ $eq: ["$status", "cancelled"] }, 1, 0] } }
-				}
-			}
-		]);
+        const orders = await Order.find(filter)
+            .populate("product", "name images thumbnail")
+            .populate("user", "name email phone")
+            .sort(sort)
+            .skip(skip)
+            .limit(limitNum);
 
-		res.json({
-			success: true,
-			data: {
-				orders,
-				summary: summary[0] || {
-					totalOrders: 0,
-					totalRevenue: 0,
-					totalItems: 0,
-					pendingOrders: 0,
-					processingOrders: 0,
-					deliveredOrders: 0,
-					cancelledOrders: 0
-				},
-				pagination: {
-					page: parseInt(page),
-					limit: parseInt(limit),
-					total,
-					pages: Math.ceil(total / limit)
-				}
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        const total = await Order.countDocuments(filter);
+
+        res.json({
+            success: true,
+            data: orders,
+            pagination: {
+                page: pageNum,
+                limit: limitNum,
+                total,
+                pages: Math.ceil(total / limitNum)
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Update order status (Admin only)
-router.patch("/admin/:orderId/status", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { orderId } = req.params;
-		const { status, trackingNumber, carrier } = req.body;
+// 📄 GET ORDER DETAILS (Admin Only)
+router.get("/admin/orders/:id", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		const validStatuses = ["pending", "confirmed", "processing", "shipped", "delivered", "cancelled", "returned"];
-		
-		if (!validStatuses.includes(status)) {
-			return res.status(400).json({ success: false, message: "Invalid status" });
-		}
+        const order = await Order.findById(req.params.id)
+            .populate("product", "name images thumbnail brand price")
+            .populate("user", "name email phone avatar");
 
-		const order = await Order.findById(orderId);
+        if (!order) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found"
+            });
+        }
 
-		if (!order) {
-			return res.status(404).json({ success: false, message: "Order not found" });
-		}
+        // Get payment details
+        const payment = await Payment.findOne({ order: order._id });
 
-		order.status = status;
+        res.json({
+            success: true,
+            data: {
+                ...order.toObject(),
+                payment
+            }
+        });
 
-		// Update shipping info
-		if (status === "shipped") {
-			order.shipping.shippedAt = new Date();
-			if (trackingNumber) order.shipping.trackingNumber = trackingNumber;
-			if (carrier) order.shipping.carrier = carrier;
-		}
-
-		if (status === "delivered") {
-			order.shipping.deliveredAt = new Date();
-			order.isDelivered = true;
-		}
-
-		if (status === "cancelled") {
-			// Restore stock
-			await Product.findByIdAndUpdate(order.product, {
-				$inc: { stock: order.quantity, soldCount: -order.quantity }
-			});
-		}
-
-		await order.save();
-
-		res.json({
-			success: true,
-			message: `Order status updated to ${status}`,
-			data: order
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Update payment status (Admin only)
-router.patch("/admin/:orderId/payment", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { orderId } = req.params;
-		const { paymentStatus, transactionId } = req.body;
+// ✏️ UPDATE ORDER STATUS (Admin Only)
+router.put("/admin/orders/:id/status", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		const validStatuses = ["pending", "paid", "failed", "refunded"];
+        const { status, notes } = req.body;
+        const validStatuses = ["pending", "confirmed", "processing", "shipped", "delivered", "cancelled", "returned"];
 
-		if (!validStatuses.includes(paymentStatus)) {
-			return res.status(400).json({ success: false, message: "Invalid payment status" });
-		}
+        if (!status || !validStatuses.includes(status)) {
+            return res.status(400).json({
+                success: false,
+                message: `Valid status required: ${validStatuses.join(", ")}`
+            });
+        }
 
-		const order = await Order.findById(orderId);
+        const order = await Order.findById(req.params.id);
+        if (!order) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found"
+            });
+        }
 
-		if (!order) {
-			return res.status(404).json({ success: false, message: "Order not found" });
-		}
+        // Update shipping timestamps
+        if (status === "shipped" && order.status !== "shipped") {
+            order.shipping.shippedAt = new Date();
+        }
+        if (status === "delivered" && order.status !== "delivered") {
+            order.shipping.deliveredAt = new Date();
+            order.isDelivered = true;
+        }
 
-		order.payment.status = paymentStatus;
-		if (transactionId) order.payment.transactionId = transactionId;
-		if (paymentStatus === "paid") {
-			order.payment.paidAt = new Date();
-			order.isPaid = true;
-		}
+        order.status = status;
+        if (notes) order.notes = notes;
+        await order.save();
 
-		await order.save();
+        res.json({
+            success: true,
+            message: "Order status updated",
+            data: order
+        });
 
-		res.json({
-			success: true,
-			message: `Payment status updated to ${paymentStatus}`,
-			data: order
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Process return request (Admin only)
-router.patch("/admin/:orderId/return", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { orderId } = req.params;
-		const { action } = req.body;
+// 🚚 UPDATE SHIPPING INFO (Admin Only)
+router.put("/admin/orders/:id/shipping", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		if (!["approve", "reject"].includes(action)) {
-			return res.status(400).json({ success: false, message: "Action must be approve or reject" });
-		}
+        const { trackingNumber, carrier, method } = req.body;
 
-		const order = await Order.findById(orderId);
+        const order = await Order.findById(req.params.id);
+        if (!order) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found"
+            });
+        }
 
-		if (!order) {
-			return res.status(404).json({ success: false, message: "Order not found" });
-		}
+        if (trackingNumber) order.shipping.trackingNumber = trackingNumber;
+        if (carrier) order.shipping.carrier = carrier;
+        if (method) order.shipping.method = method;
 
-		if (order.refund.status !== "requested") {
-			return res.status(400).json({ success: false, message: "No pending return request" });
-		}
+        await order.save();
 
-		if (action === "approve") {
-			order.refund.status = "approved";
-			order.payment.status = "refunded";
-			
-			// Restore stock
-			await Product.findByIdAndUpdate(order.product, {
-				$inc: { stock: order.quantity, soldCount: -order.quantity }
-			});
-		} else {
-			order.refund.status = "rejected";
-			order.status = "delivered";
-		}
+        res.json({
+            success: true,
+            message: "Shipping info updated",
+            data: order.shipping
+        });
 
-		await order.save();
-
-		res.json({
-			success: true,
-			message: `Return request ${action}d successfully`,
-			data: order
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Get order analytics (Admin only)
-router.get("/admin/analytics", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { period = "month" } = req.query;
+// 💰 UPDATE PAYMENT STATUS (Admin Only)
+router.put("/admin/orders/:id/payment", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		let dateFilter = {};
-		const now = new Date();
-		
-		if (period === "week") {
-			dateFilter = { createdAt: { $gte: new Date(now.setDate(now.getDate() - 7)) } };
-		} else if (period === "month") {
-			dateFilter = { createdAt: { $gte: new Date(now.setMonth(now.getMonth() - 1)) } };
-		} else if (period === "year") {
-			dateFilter = { createdAt: { $gte: new Date(now.setFullYear(now.getFullYear() - 1)) } };
-		}
+        const { status, transactionId } = req.body;
+        const validStatuses = ["pending", "paid", "failed", "refunded"];
 
-		const analytics = await Order.aggregate([
-			{ $match: dateFilter },
-			{
-				$group: {
-					_id: {
-						$dateToString: { format: period === "week" ? "%Y-%m-%d" : period === "month" ? "%Y-%m" : "%Y", date: "$createdAt" }
-					},
-					orders: { $sum: 1 },
-					revenue: { $sum: { $add: ["$totalPrice", "$shippingCharge"] } },
-					items: { $sum: "$quantity" }
-				}
-			},
-			{ $sort: { _id: 1 } }
-		]);
+        if (!status || !validStatuses.includes(status)) {
+            return res.status(400).json({
+                success: false,
+                message: `Valid payment status required: ${validStatuses.join(", ")}`
+            });
+        }
 
-		const topProducts = await Order.aggregate([
-			{ $match: dateFilter },
-			{
-				$group: {
-					_id: "$product",
-					totalSold: { $sum: "$quantity" },
-					totalRevenue: { $sum: { $add: ["$totalPrice", "$shippingCharge"] } }
-				}
-			},
-			{ $sort: { totalSold: -1 } },
-			{ $limit: 10 },
-			{
-				$lookup: {
-					from: "products",
-					localField: "_id",
-					foreignField: "_id",
-					as: "product"
-				}
-			},
-			{ $unwind: "$product" }
-		]);
+        const order = await Order.findById(req.params.id);
+        if (!order) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found"
+            });
+        }
 
-		res.json({
-			success: true,
-			data: {
-				analytics,
-				topProducts,
-				period
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        order.payment.status = status;
+        if (transactionId) order.payment.transactionId = transactionId;
+        if (status === "paid") {
+            order.payment.paidAt = new Date();
+            order.isPaid = true;
+        }
+        if (status === "refunded") {
+            order.isPaid = false;
+        }
+
+        await order.save();
+
+        res.json({
+            success: true,
+            message: "Payment status updated",
+            data: order.payment
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Bulk update order status (Admin only)
-router.patch("/admin/bulk/status", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { orderIds, status } = req.body;
+// 🔄 PROCESS REFUND (Admin Only)
+router.put("/admin/orders/:id/refund", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		if (!orderIds || !Array.isArray(orderIds) || orderIds.length === 0) {
-			return res.status(400).json({ success: false, message: "Order IDs array required" });
-		}
+        const { amount, reason } = req.body;
+        const order = await Order.findById(req.params.id);
 
-		const validStatuses = ["pending", "confirmed", "processing", "shipped", "delivered", "cancelled"];
-		
-		if (!validStatuses.includes(status)) {
-			return res.status(400).json({ success: false, message: "Invalid status" });
-		}
+        if (!order) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found"
+            });
+        }
 
-		const result = await Order.updateMany(
-			{ _id: { $in: orderIds } },
-			{ status }
-		);
+        if (order.refund.status === "none" && order.refund.status !== "requested") {
+            return res.status(400).json({
+                success: false,
+                message: "No refund request for this order"
+            });
+        }
 
-		res.json({
-			success: true,
-			message: `${result.modifiedCount} orders updated`,
-			data: { modifiedCount: result.modifiedCount }
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        order.refund.status = "approved";
+        order.refund.amount = amount || order.totalPrice;
+        if (reason) order.refund.reason = reason;
+        order.refund.refundedAt = new Date();
+
+        // Update payment status
+        order.payment.status = "refunded";
+        order.isPaid = false;
+
+        await order.save();
+
+        // Restore product stock
+        const product = await Product.findById(order.product);
+        if (product) {
+            product.stock += order.quantity;
+            product.soldCount = Math.max(0, (product.soldCount || 0) - order.quantity);
+            await product.save();
+        }
+
+        res.json({
+            success: true,
+            message: "Refund processed successfully",
+            data: order
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 📊 GET ORDER STATISTICS (Admin Only)
+router.get("/admin/stats", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const totalOrders = await Order.countDocuments();
+        const pendingOrders = await Order.countDocuments({ status: "pending" });
+        const processingOrders = await Order.countDocuments({ status: "processing" });
+        const shippedOrders = await Order.countDocuments({ status: "shipped" });
+        const deliveredOrders = await Order.countDocuments({ status: "delivered" });
+        const cancelledOrders = await Order.countDocuments({ status: "cancelled" });
+        const returnedOrders = await Order.countDocuments({ status: "returned" });
+
+        // Revenue stats
+        const revenueData = await Order.aggregate([
+            {
+                $match: { 
+                    status: { $in: ["delivered", "shipped"] },
+                    "payment.status": "paid"
+                }
+            },
+            {
+                $group: {
+                    _id: null,
+                    totalRevenue: { $sum: "$totalPrice" },
+                    totalOrders: { $sum: 1 },
+                    averageOrderValue: { $avg: "$totalPrice" }
+                }
+            }
+        ]);
+
+        // Daily orders for last 7 days
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+        const dailyOrders = await Order.aggregate([
+            {
+                $match: {
+                    createdAt: { $gte: sevenDaysAgo }
+                }
+            },
+            {
+                $group: {
+                    _id: {
+                        $dateToString: { format: "%Y-%m-%d", date: "$createdAt" }
+                    },
+                    count: { $sum: 1 },
+                    revenue: { $sum: "$totalPrice" }
+                }
+            },
+            {
+                $sort: { _id: 1 }
+            }
+        ]);
+
+        // Orders by payment method
+        const paymentMethodStats = await Order.aggregate([
+            {
+                $group: {
+                    _id: "$payment.method",
+                    count: { $sum: 1 },
+                    total: { $sum: "$totalPrice" }
+                }
+            }
+        ]);
+
+        const revenue = revenueData.length > 0 ? revenueData[0] : {
+            totalRevenue: 0,
+            totalOrders: 0,
+            averageOrderValue: 0
+        };
+
+        res.json({
+            success: true,
+            data: {
+                totalOrders,
+                pendingOrders,
+                processingOrders,
+                shippedOrders,
+                deliveredOrders,
+                cancelledOrders,
+                returnedOrders,
+                revenue: {
+                    total: revenue.totalRevenue || 0,
+                    averageOrderValue: revenue.averageOrderValue || 0
+                },
+                dailyOrders,
+                paymentMethodStats
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 📥 GET ORDERS BY USER (Admin Only)
+router.get("/admin/users/:userId/orders", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const orders = await Order.find({ user: req.params.userId })
+            .populate("product", "name images thumbnail")
+            .sort("-createdAt");
+
+        res.json({
+            success: true,
+            count: orders.length,
+            data: orders
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// ❌ DELETE ORDER (Admin Only)
+router.delete("/admin/orders/:id", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const order = await Order.findById(req.params.id);
+        if (!order) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found"
+            });
+        }
+
+        // Restore product stock if not cancelled/refunded
+        if (order.status !== "cancelled" && order.status !== "returned") {
+            const product = await Product.findById(order.product);
+            if (product) {
+                product.stock += order.quantity;
+                product.soldCount = Math.max(0, (product.soldCount || 0) - order.quantity);
+                await product.save();
+            }
+        }
+
+        await order.deleteOne();
+
+        res.json({
+            success: true,
+            message: "Order deleted successfully"
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// ==============================
+// 📈 EXPORT ORDERS (Admin Only)
+// ==============================
+
+// 📊 EXPORT ORDERS AS CSV
+router.get("/admin/export/csv", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const { dateFrom, dateTo } = req.query;
+        const filter = {};
+
+        if (dateFrom || dateTo) {
+            filter.createdAt = {};
+            if (dateFrom) filter.createdAt.$gte = new Date(dateFrom);
+            if (dateTo) filter.createdAt.$lte = new Date(dateTo);
+        }
+
+        const orders = await Order.find(filter)
+            .populate("product", "name")
+            .populate("user", "name email")
+            .sort("-createdAt");
+
+        // Create CSV header
+        let csv = "Order ID,Customer,Email,Product,Quantity,Total,Status,Payment Method,Payment Status,Date\n";
+
+        // Add data rows
+        orders.forEach(order => {
+            csv += `${order.orderId},"${order.user.name}","${order.user.email}","${order.product.name}",${order.quantity},${order.totalPrice},${order.status},${order.payment.method},${order.payment.status},${order.createdAt.toISOString()}\n`;
+        });
+
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader("Content-Disposition", `attachment; filename=orders-${new Date().toISOString().split("T")[0]}.csv`);
+        res.send(csv);
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
 module.exports = router;

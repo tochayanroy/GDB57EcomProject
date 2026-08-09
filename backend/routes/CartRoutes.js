@@ -1,816 +1,771 @@
 const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
-const passport = require("passport");
 const Cart = require("../modules/CartSchema");
 const Product = require("../modules/ProductSchema");
 const User = require("../modules/UserSchema");
-const Category = require("../modules/CategorySchema");
-const Review = require("../modules/ReviewSchema");
-const Wishlist = require("../modules/WishlistSchema");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-
+const passport = require("passport");
 
 // ==============================
-// MIDDLEWARE
-// ==============================
-const authorizeAdmin = (req, res, next) => {
-    try {
-        if (!req.user) {
-            return res.status(401).json({ 
-                success: false, 
-                message: "Authentication required" 
-            });
-        }
-        
-        if (req.user.role !== "admin") {
-            return res.status(403).json({ 
-                success: false, 
-                message: "Admin access required" 
-            });
-        }
-        
-        next();
-    } catch (error) {
-        res.status(500).json({ 
-            success: false, 
-            message: "Server error during authorization" 
-        });
-    }
-};
-// Check if product exists and get product details
-const checkProductExists = async (req, res, next) => {
-	try {
-		const { productId } = req.params;
-		const product = await Product.findById(productId);
-		if (!product) {
-			return res.status(404).json({ success: false, message: "Product not found" });
-		}
-		
-		// Check if product is active
-		if (!product.isActive) {
-			return res.status(400).json({ success: false, message: "Product is not available" });
-		}
-		
-		req.product = product;
-		next();
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-};
-
-// Calculate cart total helper function
-const calculateCartTotal = (cartItems) => {
-	let subtotal = 0;
-	let totalShipping = 0;
-	let totalDiscount = 0;
-	
-	for (const item of cartItems) {
-		subtotal += item.totalPrice;
-		totalShipping += item.shippingCharge || 0;
-		totalDiscount += item.discountPrice || 0;
-	}
-	
-	const grandTotal = subtotal + totalShipping;
-	
-	return {
-		subtotal,
-		totalShipping,
-		totalDiscount,
-		grandTotal,
-		itemCount: cartItems.length
-	};
-};
-
-// ==============================
-// 📋 USER ROUTES (Authenticated users only)
+// 🛒 CART ROUTES (Protected - User)
 // ==============================
 
-// Get user's cart
+// 📥 GET USER CART
 router.get("/", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		
-		let cartItems = await Cart.find({ user: userId })
-			.populate("product", "name slug price discountPrice thumbnail images stock isActive brand")
-			.sort("-createdAt")
-			.lean();
-		
-		if (!cartItems || cartItems.length === 0) {
-			return res.json({
-				success: true,
-				data: {
-					items: [],
-					summary: {
-						subtotal: 0,
-						totalShipping: 0,
-						totalDiscount: 0,
-						grandTotal: 0,
-						itemCount: 0
-					}
-				}
-			});
-		}
-		
-		// Process cart items and check availability
-		const processedItems = [];
-		let unavailableItems = [];
-		
-		for (const item of cartItems) {
-			if (!item.product) {
-				unavailableItems.push(item._id);
-				continue;
-			}
-			
-			if (!item.product.isActive) {
-				unavailableItems.push(item._id);
-				continue;
-			}
-			
-			// Calculate current price
-			const currentPrice = item.product.discountPrice && item.product.discountPrice > 0 
-				? item.product.discountPrice 
-				: item.product.price;
-			
-			// Check stock availability
-			const stockAvailable = item.product.stock >= item.quantity;
-			
-			// Calculate item total
-			const itemTotal = currentPrice * item.quantity;
-			
-			processedItems.push({
-				_id: item._id,
-				product: {
-					_id: item.product._id,
-					name: item.product.name,
-					slug: item.product.slug,
-					price: item.product.price,
-					discountPrice: item.product.discountPrice,
-					currentPrice: currentPrice,
-					thumbnail: item.product.thumbnail,
-					stock: item.product.stock,
-					brand: item.product.brand
-				},
-				variant: item.variant,
-				quantity: item.quantity,
-				discountPrice: item.discountPrice,
-				shippingCharge: item.shippingCharge,
-				totalPrice: item.totalPrice,
-				currentTotalPrice: itemTotal,
-				stockAvailable,
-				priceChanged: item.totalPrice !== itemTotal
-			});
-		}
-		
-		// Remove unavailable items from cart
-		if (unavailableItems.length > 0) {
-			await Cart.deleteMany({ _id: { $in: unavailableItems } });
-		}
-		
-		// Calculate summary
-		const summary = calculateCartTotal(processedItems);
-		
-		res.json({
-			success: true,
-			data: {
-				items: processedItems,
-				summary,
-				unavailableRemoved: unavailableItems.length > 0,
-				unavailableCount: unavailableItems.length
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Get cart summary (count and total)
-router.get("/summary", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		
-		const cartItems = await Cart.find({ user: userId })
-			.populate("product", "price discountPrice")
-			.lean();
-		
-		let itemCount = 0;
-		let subtotal = 0;
-		
-		for (const item of cartItems) {
-			if (item.product) {
-				const currentPrice = item.product.discountPrice && item.product.discountPrice > 0 
-					? item.product.discountPrice 
-					: item.product.price;
-				itemCount += item.quantity;
-				subtotal += currentPrice * item.quantity;
-			}
-		}
-		
-		res.json({
-			success: true,
-			data: {
-				itemCount,
-				subtotal: subtotal.toFixed(2),
-				cartCount: cartItems.length
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Add item to cart
-router.post("/add/:productId", passport.authenticate("jwt", { session: false }), checkProductExists, async (req, res) => {
-	try {
-		const userId = req.user._id;
-		const { productId } = req.params;
-		const { quantity = 1, variant = null } = req.body;
-		const product = req.product;
-		
-		// Validate quantity
-		if (quantity < 1) {
-			return res.status(400).json({ success: false, message: "Quantity must be at least 1" });
-		}
-		
-		// Check stock
-		if (product.stock < quantity) {
-			return res.status(400).json({ 
-				success: false, 
-				message: `Only ${product.stock} items available in stock` 
-			});
-		}
-		
-		// Calculate price
-		const currentPrice = product.discountPrice && product.discountPrice > 0 
-			? product.discountPrice 
-			: product.price;
-		const totalPrice = currentPrice * quantity;
-		
-		// Check if item already exists in cart
-		let existingCartItem = await Cart.findOne({ 
-			user: userId, 
-			product: productId,
-			variant: variant || null
-		});
-		
-		if (existingCartItem) {
-			// Update quantity
-			const newQuantity = existingCartItem.quantity + quantity;
-			
-			if (product.stock < newQuantity) {
-				return res.status(400).json({ 
-					success: false, 
-					message: `Only ${product.stock} items available in stock` 
-				});
-			}
-			
-			existingCartItem.quantity = newQuantity;
-			existingCartItem.totalPrice = currentPrice * newQuantity;
-			existingCartItem.discountPrice = product.discountPrice || 0;
-			existingCartItem.shippingCharge = product.shippingCharge || 0;
-			await existingCartItem.save();
-			
-			// Update user's cart reference
-			await User.findByIdAndUpdate(userId, { cart: existingCartItem._id });
-			
-			return res.json({
-				success: true,
-				message: "Cart updated successfully",
-				data: {
-					item: existingCartItem,
-					quantity: existingCartItem.quantity,
-					totalPrice: existingCartItem.totalPrice
-				}
-			});
-		}
-		
-		// Create new cart item
-		const cartItem = await Cart.create({
-			product: productId,
-			user: userId,
-			variant: variant || null,
-			quantity,
-			discountPrice: product.discountPrice || 0,
-			shippingCharge: product.shippingCharge || 0,
-			totalPrice,
-			coupon: {
-				code: null,
-				discountAmount: 0
-			}
-		});
-		
-		// Update user's cart reference
-		await User.findByIdAndUpdate(userId, { cart: cartItem._id });
-		
-		res.status(201).json({
-			success: true,
-			message: "Item added to cart successfully",
-			data: cartItem
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Update cart item quantity
-router.put("/update/:cartItemId", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		const { cartItemId } = req.params;
-		const { quantity } = req.body;
-		
-		if (!quantity || quantity < 1) {
-			return res.status(400).json({ success: false, message: "Quantity must be at least 1" });
-		}
-		
-		const cartItem = await Cart.findOne({ _id: cartItemId, user: userId });
-		
-		if (!cartItem) {
-			return res.status(404).json({ success: false, message: "Cart item not found" });
-		}
-		
-		// Check product stock
-		const product = await Product.findById(cartItem.product);
-		if (!product || !product.isActive) {
-			await Cart.findByIdAndDelete(cartItemId);
-			return res.status(400).json({ success: false, message: "Product no longer available" });
-		}
-		
-		if (product.stock < quantity) {
-			return res.status(400).json({ 
-				success: false, 
-				message: `Only ${product.stock} items available in stock` 
-			});
-		}
-		
-		// Calculate new total price
-		const currentPrice = product.discountPrice && product.discountPrice > 0 
-			? product.discountPrice 
-			: product.price;
-		const totalPrice = currentPrice * quantity;
-		
-		cartItem.quantity = quantity;
-		cartItem.totalPrice = totalPrice;
-		await cartItem.save();
-		
-		// Get updated cart summary
-		const allCartItems = await Cart.find({ user: userId });
-		const summary = calculateCartTotal(allCartItems);
-		
-		res.json({
-			success: true,
-			message: "Cart updated successfully",
-			data: {
-				item: cartItem,
-				summary
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-
-// Remove multiple items from cart (bulk remove)
-router.delete("/remove/bulk", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		const { cartItemIds } = req.body;
-		
-		if (!cartItemIds || !Array.isArray(cartItemIds) || cartItemIds.length === 0) {
-			return res.status(400).json({ success: false, message: "Cart item IDs array required" });
-		}
-		
-		const result = await Cart.deleteMany({ 
-			_id: { $in: cartItemIds }, 
-			user: userId 
-		});
-		
-		// Check if user has any other cart items
-		const remainingItems = await Cart.countDocuments({ user: userId });
-		
-		if (remainingItems === 0) {
-			await User.findByIdAndUpdate(userId, { cart: null });
-		}
-		
-		// Get updated cart summary
-		const allCartItems = await Cart.find({ user: userId }).populate("product", "price discountPrice");
-		const summary = calculateCartTotal(allCartItems);
-		
-		res.json({
-			success: true,
-			message: `${result.deletedCount} item(s) removed from cart`,
-			data: {
-				deletedCount: result.deletedCount,
-				summary
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-
-// Remove single item from cart
-router.delete("/remove/:cartItemId", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		const { cartItemId } = req.params;
-		
-		const cartItem = await Cart.findOneAndDelete({ _id: cartItemId, user: userId });
-		
-		if (!cartItem) {
-			return res.status(404).json({ success: false, message: "Cart item not found" });
-		}
-		
-		// Check if user has any other cart items
-		const remainingItems = await Cart.countDocuments({ user: userId });
-		
-		if (remainingItems === 0) {
-			await User.findByIdAndUpdate(userId, { cart: null });
-		}
-		
-		// Get updated cart summary
-		const allCartItems = await Cart.find({ user: userId }).populate("product", "price discountPrice");
-		const summary = calculateCartTotal(allCartItems);
-		
-		res.json({
-			success: true,
-			message: "Item removed from cart",
-			data: {
-				summary
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-
-// Clear entire cart
-router.delete("/clear", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		
-		const result = await Cart.deleteMany({ user: userId });
-		
-		await User.findByIdAndUpdate(userId, { cart: null });
-		
-		res.json({
-			success: true,
-			message: `Cart cleared successfully (${result.deletedCount} items removed)`,
-			data: {
-				deletedCount: result.deletedCount
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Apply coupon to cart
-router.post("/apply-coupon", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		const { couponCode } = req.body;
-		
-		if (!couponCode) {
-			return res.status(400).json({ success: false, message: "Coupon code required" });
-		}
-		
-		// Get all cart items
-		const cartItems = await Cart.find({ user: userId });
-		
-		if (cartItems.length === 0) {
-			return res.status(400).json({ success: false, message: "Cart is empty" });
-		}
-		
-		// Calculate subtotal
-		let subtotal = 0;
-		for (const item of cartItems) {
-			const product = await Product.findById(item.product);
-			if (product) {
-				const currentPrice = product.discountPrice && product.discountPrice > 0 
-					? product.discountPrice 
-					: product.price;
-				subtotal += currentPrice * item.quantity;
-			}
-		}
-		
-		// TODO: Implement actual coupon validation logic here
-		// This is a placeholder for coupon validation
-		const validCoupons = {
-			"SAVE10": { discount: 10, type: "percentage", minOrder: 500 },
-			"SAVE20": { discount: 20, type: "percentage", minOrder: 1000 },
-			"FLAT50": { discount: 50, type: "fixed", minOrder: 300 }
-		};
-		
-		const coupon = validCoupons[couponCode.toUpperCase()];
-		
-		if (!coupon) {
-			return res.status(400).json({ success: false, message: "Invalid coupon code" });
-		}
-		
-		if (subtotal < coupon.minOrder) {
-			return res.status(400).json({ 
-				success: false, 
-				message: `Minimum order of ₹${coupon.minOrder} required for this coupon` 
-			});
-		}
-		
-		let discountAmount = 0;
-		if (coupon.type === "percentage") {
-			discountAmount = (subtotal * coupon.discount) / 100;
-		} else {
-			discountAmount = coupon.discount;
-		}
-		
-		// Apply coupon to all cart items (or you can apply to specific items)
-		for (const item of cartItems) {
-			item.coupon = {
-				code: couponCode.toUpperCase(),
-				discountAmount: discountAmount / cartItems.length // Distribute discount evenly
-			};
-			await item.save();
-		}
-		
-		const grandTotal = subtotal - discountAmount;
-		
-		res.json({
-			success: true,
-			message: "Coupon applied successfully",
-			data: {
-				couponCode: couponCode.toUpperCase(),
-				discountAmount,
-				subtotal,
-				grandTotal
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Remove coupon from cart
-router.delete("/remove-coupon", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		
-		const result = await Cart.updateMany(
-			{ user: userId },
-			{ coupon: { code: null, discountAmount: 0 } }
-		);
-		
-		res.json({
-			success: true,
-			message: "Coupon removed successfully",
-			data: {
-				modifiedCount: result.modifiedCount
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Sync cart prices with current product prices
-router.put("/sync-prices", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		
-		const cartItems = await Cart.find({ user: userId });
-		
-		let updatedCount = 0;
-		const priceChanges = [];
-		
-		for (const item of cartItems) {
-			const product = await Product.findById(item.product);
-			if (product && product.isActive) {
-				const currentPrice = product.discountPrice && product.discountPrice > 0 
-					? product.discountPrice 
-					: product.price;
-				const newTotalPrice = currentPrice * item.quantity;
-				
-				if (item.totalPrice !== newTotalPrice) {
-					priceChanges.push({
-						productId: item.product,
-						oldPrice: item.totalPrice,
-						newPrice: newTotalPrice,
-						quantity: item.quantity
-					});
-					item.totalPrice = newTotalPrice;
-					item.discountPrice = product.discountPrice || 0;
-					await item.save();
-					updatedCount++;
-				}
-			}
-		}
-		
-		// Get updated summary
-		const updatedCartItems = await Cart.find({ user: userId }).populate("product", "price discountPrice");
-		const summary = calculateCartTotal(updatedCartItems);
-		
-		res.json({
-			success: true,
-			message: `${updatedCount} item(s) price updated`,
-			data: {
-				updatedCount,
-				priceChanges,
-				summary
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Get cart item count (for navbar badge)
-router.get("/count", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		
-		const result = await Cart.aggregate([
-			{ $match: { user: userId } },
-			{ $group: { _id: null, totalQuantity: { $sum: "$quantity" } } }
-		]);
-		
-		const totalQuantity = result.length > 0 ? result[0].totalQuantity : 0;
-		
-		res.json({
-			success: true,
-			data: {
-				count: totalQuantity
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Validate cart items before checkout
-router.get("/validate", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		
-		const cartItems = await Cart.find({ user: userId })
-			.populate("product", "name price discountPrice stock isActive");
-		
-		const validationResults = {
-			valid: true,
-			items: [],
-			unavailableItems: [],
-			outOfStockItems: [],
-			priceChangedItems: []
-		};
-		
-		for (const item of cartItems) {
-			const itemValidation = {
-				itemId: item._id,
-				productId: item.product?._id,
-				productName: item.product?.name,
-				quantity: item.quantity,
-				valid: true,
-				issues: []
-			};
-			
-			if (!item.product || !item.product.isActive) {
-				itemValidation.valid = false;
-				itemValidation.issues.push("Product no longer available");
-				validationResults.unavailableItems.push(itemValidation);
-				validationResults.valid = false;
-			} else if (item.product.stock < item.quantity) {
-				itemValidation.valid = false;
-				itemValidation.issues.push(`Only ${item.product.stock} items in stock`);
-				validationResults.outOfStockItems.push(itemValidation);
-				validationResults.valid = false;
-			} else {
-				const currentPrice = item.product.discountPrice && item.product.discountPrice > 0 
-					? item.product.discountPrice 
-					: item.product.price;
-				const expectedTotal = currentPrice * item.quantity;
-				
-				if (item.totalPrice !== expectedTotal) {
-					itemValidation.issues.push("Price changed");
-					validationResults.priceChangedItems.push(itemValidation);
-				}
-			}
-			
-			validationResults.items.push(itemValidation);
-		}
-		
-		res.json({
-			success: true,
-			data: validationResults
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Move cart items to wishlist
-router.post(
-  "/move-to-wishlist/:cartItemId",
-  passport.authenticate("jwt", { session: false }),
-  async (req, res) => {
     try {
+        const cartItems = await Cart.find({ user: req.user._id })
+            .populate({
+                path: "product",
+                select: "name slug description price discountPrice images thumbnail stock shippingCharge brand"
+            })
+            .sort({ createdAt: -1 });
 
-      const userId = req.user._id;
-      const { cartItemId } = req.params;
+        // Calculate cart totals
+        let subtotal = 0;
+        let totalDiscount = 0;
+        let totalShipping = 0;
+        let totalItems = 0;
 
-      // Find cart item
-      const cartItem = await Cart.findOne({
-        _id: cartItemId,
-        user: userId
-      });
-
-      if (!cartItem) {
-        return res.status(404).json({
-          success: false,
-          message: "Cart item not found"
-        });
-      }
-
-      // Find product
-      const product = await Product.findById(
-        cartItem.product
-      );
-
-      if (!product) {
-        return res.status(404).json({
-          success: false,
-          message: "Product not found"
-        });
-      }
-
-      // Find wishlist
-      let wishlist = await Wishlist.findOne({
-        user: userId
-      });
-
-      // Create wishlist if not exists
-      if (!wishlist) {
-        wishlist = new Wishlist({
-          user: userId,
-          items: [],
-          totalItems: 0
-        });
-      }
-
-      // Ensure items array exists
-      if (!wishlist.items) {
-        wishlist.items = [];
-      }
-
-      // Prevent duplicate
-      const existingItem = wishlist.items.find(
-        item =>
-          item.product.toString() ===
-          cartItem.product.toString() &&
-          (item.variant || null) ===
-          (cartItem.variant || null)
-      );
-
-      // Add only if not exists
-      if (!existingItem) {
-
-        const currentPrice =
-          product.discountPrice &&
-          product.discountPrice > 0
-            ? product.discountPrice
-            : product.price;
-
-        wishlist.items.push({
-          product: cartItem.product,
-          variant: cartItem.variant || null,
-          price: currentPrice,
-          addedAt: new Date()
+        cartItems.forEach(item => {
+            const itemPrice = item.product.discountPrice > 0 ? item.product.discountPrice : item.product.price;
+            subtotal += itemPrice * item.quantity;
+            totalDiscount += (item.product.price - itemPrice) * item.quantity;
+            totalShipping += (item.product.shippingCharge || 0) * item.quantity;
+            totalItems += item.quantity;
         });
 
-        wishlist.totalItems =
-          wishlist.items.length;
+        const total = subtotal + totalShipping;
 
-        await wishlist.save();
-      }
-
-      // Remove from cart
-      await cartItem.deleteOne();
-
-      res.json({
-        success: true,
-        message:
-          "Product moved to wishlist successfully"
-      });
+        res.json({
+            success: true,
+            data: {
+                items: cartItems,
+                summary: {
+                    totalItems,
+                    subtotal,
+                    totalDiscount,
+                    totalShipping,
+                    total,
+                    savings: totalDiscount > 0 ? totalDiscount : 0
+                }
+            }
+        });
 
     } catch (error) {
-
-      res.status(500).json({
-        success: false,
-        message: error.message
-      });
-
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
     }
-  }
-);
+});
+
+// ➕ ADD ITEM TO CART
+router.post("/add", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const { productId, quantity = 1, variant } = req.body;
+
+        // Validation
+        if (!productId) {
+            return res.status(400).json({
+                success: false,
+                message: "Product ID is required"
+            });
+        }
+
+        if (quantity < 1) {
+            return res.status(400).json({
+                success: false,
+                message: "Quantity must be at least 1"
+            });
+        }
+
+        // Check product exists and is active
+        const product = await Product.findOne({ 
+            _id: productId,
+            isActive: true 
+        });
+
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: "Product not found or inactive"
+            });
+        }
+
+        // Check stock availability
+        if (product.stock < quantity) {
+            return res.status(400).json({
+                success: false,
+                message: `Not enough stock. Available: ${product.stock}`
+            });
+        }
+
+        // Check if product already in cart with same variant
+        const existingCartItem = await Cart.findOne({
+            user: req.user._id,
+            product: productId,
+            variant: variant || null
+        });
+
+        if (existingCartItem) {
+            // Update quantity
+            const newQuantity = existingCartItem.quantity + quantity;
+            
+            // Check stock for new quantity
+            if (product.stock < newQuantity) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Not enough stock. Available: ${product.stock}`
+                });
+            }
+
+            existingCartItem.quantity = newQuantity;
+            existingCartItem.totalPrice = (product.discountPrice > 0 ? product.discountPrice : product.price) * newQuantity;
+            await existingCartItem.save();
+
+            return res.json({
+                success: true,
+                message: "Cart item quantity updated",
+                data: existingCartItem
+            });
+        }
+
+        // Calculate price
+        const itemPrice = product.discountPrice > 0 ? product.discountPrice : product.price;
+        const totalPrice = itemPrice * quantity;
+
+        // Create new cart item
+        const cartItem = await Cart.create({
+            product: productId,
+            user: req.user._id,
+            variant: variant || null,
+            quantity,
+            discountPrice: product.discountPrice || 0,
+            totalPrice,
+            shippingCharge: product.shippingCharge || 0
+        });
+
+        // Populate product details
+        await cartItem.populate("product");
+
+        res.status(201).json({
+            success: true,
+            message: "Item added to cart",
+            data: cartItem
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// ✏️ UPDATE CART ITEM QUANTITY
+router.put("/update/:itemId", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const { quantity } = req.body;
+        const itemId = req.params.itemId;
+
+        if (!quantity || quantity < 1) {
+            return res.status(400).json({
+                success: false,
+                message: "Valid quantity is required (minimum 1)"
+            });
+        }
+
+        // Find cart item
+        const cartItem = await Cart.findOne({
+            _id: itemId,
+            user: req.user._id
+        }).populate("product");
+
+        if (!cartItem) {
+            return res.status(404).json({
+                success: false,
+                message: "Cart item not found"
+            });
+        }
+
+        // Check stock availability
+        if (cartItem.product.stock < quantity) {
+            return res.status(400).json({
+                success: false,
+                message: `Not enough stock. Available: ${cartItem.product.stock}`
+            });
+        }
+
+        // Update quantity and price
+        cartItem.quantity = quantity;
+        const itemPrice = cartItem.product.discountPrice > 0 
+            ? cartItem.product.discountPrice 
+            : cartItem.product.price;
+        cartItem.totalPrice = itemPrice * quantity;
+
+        await cartItem.save();
+
+        res.json({
+            success: true,
+            message: "Cart item updated",
+            data: cartItem
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// ❌ REMOVE ITEM FROM CART
+router.delete("/remove/:itemId", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const cartItem = await Cart.findOneAndDelete({
+            _id: req.params.itemId,
+            user: req.user._id
+        });
+
+        if (!cartItem) {
+            return res.status(404).json({
+                success: false,
+                message: "Cart item not found"
+            });
+        }
+
+        res.json({
+            success: true,
+            message: "Item removed from cart",
+            data: cartItem
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 🗑️ CLEAR CART
+router.delete("/clear", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const result = await Cart.deleteMany({ user: req.user._id });
+
+        res.json({
+            success: true,
+            message: `Cart cleared. ${result.deletedCount} items removed`
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 🔄 APPLY COUPON TO CART
+router.post("/apply-coupon", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const { couponCode } = req.body;
+
+        if (!couponCode) {
+            return res.status(400).json({
+                success: false,
+                message: "Coupon code is required"
+            });
+        }
+
+        // TODO: Implement actual coupon validation
+        // This is a placeholder for coupon logic
+        const validCoupon = await validateCoupon(couponCode);
+
+        if (!validCoupon) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid or expired coupon code"
+            });
+        }
+
+        // Apply coupon to all cart items (or specific ones)
+        const cartItems = await Cart.find({ user: req.user._id });
+        
+        // Update cart items with coupon info
+        for (const item of cartItems) {
+            item.coupon = {
+                code: couponCode,
+                discountAmount: validCoupon.discountAmount || 0
+            };
+            await item.save();
+        }
+
+        res.json({
+            success: true,
+            message: "Coupon applied successfully",
+            data: {
+                coupon: couponCode,
+                discount: validCoupon.discountAmount || 0
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// ❌ REMOVE COUPON FROM CART
+router.delete("/remove-coupon", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const cartItems = await Cart.find({ user: req.user._id });
+        
+        for (const item of cartItems) {
+            item.coupon = {
+                code: null,
+                discountAmount: 0
+            };
+            await item.save();
+        }
+
+        res.json({
+            success: true,
+            message: "Coupon removed successfully"
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 📊 GET CART SUMMARY
+router.get("/summary", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const cartItems = await Cart.find({ user: req.user._id })
+            .populate("product", "name price discountPrice stock shippingCharge");
+
+        let totalItems = 0;
+        let subtotal = 0;
+        let totalDiscount = 0;
+        let totalShipping = 0;
+        let couponDiscount = 0;
+
+        cartItems.forEach(item => {
+            const itemPrice = item.product.discountPrice > 0 
+                ? item.product.discountPrice 
+                : item.product.price;
+            
+            totalItems += item.quantity;
+            subtotal += itemPrice * item.quantity;
+            totalDiscount += (item.product.price - itemPrice) * item.quantity;
+            totalShipping += (item.product.shippingCharge || 0) * item.quantity;
+            
+            if (item.coupon && item.coupon.discountAmount) {
+                couponDiscount += item.coupon.discountAmount;
+            }
+        });
+
+        const total = subtotal + totalShipping - couponDiscount;
+
+        res.json({
+            success: true,
+            data: {
+                totalItems,
+                subtotal,
+                totalDiscount,
+                totalShipping,
+                couponDiscount,
+                total,
+                savings: totalDiscount + couponDiscount
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 🔄 SYNC CART (For multi-device support)
+router.post("/sync", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const { items } = req.body; // Array of {productId, quantity, variant}
+
+        if (!items || !Array.isArray(items)) {
+            return res.status(400).json({
+                success: false,
+                message: "Items array is required"
+            });
+        }
+
+        // Clear existing cart
+        await Cart.deleteMany({ user: req.user._id });
+
+        // Add new items
+        const addedItems = [];
+        for (const item of items) {
+            const product = await Product.findOne({ 
+                _id: item.productId,
+                isActive: true 
+            });
+
+            if (!product) {
+                continue; // Skip invalid products
+            }
+
+            if (product.stock < (item.quantity || 1)) {
+                continue; // Skip if not enough stock
+            }
+
+            const quantity = item.quantity || 1;
+            const itemPrice = product.discountPrice > 0 ? product.discountPrice : product.price;
+            const totalPrice = itemPrice * quantity;
+
+            const cartItem = await Cart.create({
+                product: product._id,
+                user: req.user._id,
+                variant: item.variant || null,
+                quantity,
+                discountPrice: product.discountPrice || 0,
+                totalPrice,
+                shippingCharge: product.shippingCharge || 0
+            });
+
+            addedItems.push(cartItem);
+        }
+
+        res.json({
+            success: true,
+            message: `Cart synced. ${addedItems.length} items added`,
+            data: addedItems
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// ==============================
+// 👑 ADMIN CART ROUTES
+// ==============================
+
+// 📥 GET ALL USER CARTS (Admin Only)
+router.get("/admin/all", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const { page = 1, limit = 20, search } = req.query;
+        const pageNum = parseInt(page);
+        const limitNum = parseInt(limit);
+        const skip = (pageNum - 1) * limitNum;
+
+        let filter = {};
+        if (search) {
+            // Find users matching search
+            const users = await User.find({
+                $or: [
+                    { name: { $regex: search, $options: "i" } },
+                    { email: { $regex: search, $options: "i" } }
+                ]
+            }).select("_id");
+
+            const userIds = users.map(u => u._id);
+            filter.user = { $in: userIds };
+        }
+
+        const cartItems = await Cart.find(filter)
+            .populate("product", "name price discountPrice images")
+            .populate("user", "name email")
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limitNum);
+
+        const total = await Cart.countDocuments(filter);
+
+        // Group by user
+        const groupedCarts = {};
+        cartItems.forEach(item => {
+            const userId = item.user._id.toString();
+            if (!groupedCarts[userId]) {
+                groupedCarts[userId] = {
+                    user: item.user,
+                    items: [],
+                    totalItems: 0,
+                    totalPrice: 0
+                };
+            }
+            groupedCarts[userId].items.push(item);
+            groupedCarts[userId].totalItems += item.quantity;
+            groupedCarts[userId].totalPrice += item.totalPrice;
+        });
+
+        res.json({
+            success: true,
+            data: Object.values(groupedCarts),
+            pagination: {
+                page: pageNum,
+                limit: limitNum,
+                total,
+                pages: Math.ceil(total / limitNum)
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 📥 GET USER CART (Admin Only)
+router.get("/admin/users/:userId", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const cartItems = await Cart.find({ user: req.params.userId })
+            .populate("product", "name price discountPrice images stock shippingCharge");
+
+        // Calculate totals
+        let subtotal = 0;
+        let totalItems = 0;
+        cartItems.forEach(item => {
+            const itemPrice = item.product.discountPrice > 0 
+                ? item.product.discountPrice 
+                : item.product.price;
+            subtotal += itemPrice * item.quantity;
+            totalItems += item.quantity;
+        });
+
+        res.json({
+            success: true,
+            data: {
+                items: cartItems,
+                summary: {
+                    totalItems,
+                    subtotal,
+                    total: subtotal
+                }
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 🗑️ CLEAR USER CART (Admin Only)
+router.delete("/admin/users/:userId/clear", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const result = await Cart.deleteMany({ user: req.params.userId });
+
+        res.json({
+            success: true,
+            message: `Cart cleared. ${result.deletedCount} items removed`
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 📊 GET CART STATISTICS (Admin Only)
+router.get("/admin/stats", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const totalCarts = await Cart.distinct("user").countDocuments();
+        const totalItems = await Cart.countDocuments();
+        const totalQuantity = await Cart.aggregate([
+            { $group: { _id: null, total: { $sum: "$quantity" } } }
+        ]);
+
+        // Most popular products in carts
+        const popularProducts = await Cart.aggregate([
+            {
+                $group: {
+                    _id: "$product",
+                    count: { $sum: 1 },
+                    totalQuantity: { $sum: "$quantity" }
+                }
+            },
+            {
+                $lookup: {
+                    from: "products",
+                    localField: "_id",
+                    foreignField: "_id",
+                    as: "product"
+                }
+            },
+            {
+                $project: {
+                    product: { $arrayElemAt: ["$product", 0] },
+                    count: 1,
+                    totalQuantity: 1
+                }
+            },
+            {
+                $sort: { count: -1 }
+            },
+            {
+                $limit: 10
+            }
+        ]);
+
+        // Cart value distribution
+        const cartValues = await Cart.aggregate([
+            {
+                $group: {
+                    _id: "$user",
+                    totalValue: { $sum: "$totalPrice" },
+                    itemCount: { $sum: "$quantity" }
+                }
+            },
+            {
+                $group: {
+                    _id: null,
+                    avgCartValue: { $avg: "$totalValue" },
+                    maxCartValue: { $max: "$totalValue" },
+                    minCartValue: { $min: "$totalValue" },
+                    avgItems: { $avg: "$itemCount" }
+                }
+            }
+        ]);
+
+        res.json({
+            success: true,
+            data: {
+                totalCarts,
+                totalItems,
+                totalQuantity: totalQuantity.length > 0 ? totalQuantity[0].total : 0,
+                popularProducts,
+                cartValueStats: cartValues.length > 0 ? cartValues[0] : {
+                    avgCartValue: 0,
+                    maxCartValue: 0,
+                    minCartValue: 0,
+                    avgItems: 0
+                }
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// ==============================
+// 🔄 BULK OPERATIONS (Admin Only)
+// ==============================
+
+// 🔄 BULK UPDATE PRICES IN CARTS (Admin Only)
+router.put("/admin/bulk/update-prices", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const { productId, newPrice } = req.body;
+
+        if (!productId || !newPrice) {
+            return res.status(400).json({
+                success: false,
+                message: "Product ID and new price are required"
+            });
+        }
+
+        // Find all cart items with this product
+        const cartItems = await Cart.find({ product: productId })
+            .populate("product");
+
+        let updatedCount = 0;
+        for (const item of cartItems) {
+            const itemPrice = item.product.discountPrice > 0 
+                ? item.product.discountPrice 
+                : item.product.price;
+            
+            item.totalPrice = itemPrice * item.quantity;
+            await item.save();
+            updatedCount++;
+        }
+
+        res.json({
+            success: true,
+            message: `Updated prices for ${updatedCount} cart items`
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// ==============================
+// 🛡️ HELPERS (Placeholder functions)
+// ==============================
+
+// Placeholder for coupon validation
+async function validateCoupon(couponCode) {
+    // Implement actual coupon validation logic here
+    // This is just a placeholder
+    const validCoupons = {
+        "SAVE10": { discountAmount: 10, type: "percentage" },
+        "SAVE20": { discountAmount: 20, type: "percentage" },
+        "SAVE50": { discountAmount: 50, type: "percentage" },
+        "FREESHIP": { discountAmount: 0, type: "shipping" }
+    };
+
+    if (validCoupons[couponCode]) {
+        return validCoupons[couponCode];
+    }
+
+    return null;
+}
 
 module.exports = router;

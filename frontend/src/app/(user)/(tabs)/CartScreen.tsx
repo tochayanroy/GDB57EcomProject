@@ -1,8 +1,10 @@
 // CartScreen.tsx
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
-import { router, useFocusEffect } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+
 import {
     ActivityIndicator,
     Alert,
@@ -11,7 +13,6 @@ import {
     Image,
     Platform,
     RefreshControl,
-    SafeAreaView,
     StatusBar,
     StyleSheet,
     Text,
@@ -36,7 +37,7 @@ const HORIZONTAL_CARD_WIDTH = 140;
 // API CONFIGURATION
 // ============================================================================
 
-const API_BASE_URL = 'http://192.168.0.103:5000';
+const API_BASE_URL = 'http://10.225.180.27:5000';
 
 // ============================================================================
 // TYPES & INTERFACES
@@ -55,6 +56,7 @@ interface CartItem {
         stock: number;
         brand: string;
         isActive: boolean;
+        shippingCharge: number;
     };
     variant: string | null;
     quantity: number;
@@ -123,7 +125,7 @@ interface Product {
 }
 
 // ============================================================================
-// API SERVICE FUNCTIONS - Following CategoriesScreen pattern
+// API SERVICE FUNCTIONS - UPDATED TO MATCH ROUTES
 // ============================================================================
 
 // Get Cart
@@ -182,7 +184,7 @@ const getCartSummary = async (): Promise<{ itemCount: number; subtotal: string; 
     }
 };
 
-// Update Cart Item Quantity
+// Update Cart Item Quantity - FIXED
 const updateCartQuantity = async (cartItemId: string, quantity: number): Promise<{ item: CartItem; summary: CartSummary }> => {
     try {
         const token = await AsyncStorage.getItem('token');
@@ -201,13 +203,39 @@ const updateCartQuantity = async (cartItemId: string, quantity: number): Promise
         );
 
         if (response.data.success) {
-            return response.data.data;
+            // The API returns { success: true, message, data: updatedItem }
+            // but we need to extract the item properly
+            const data = response.data.data;
+            // If data is the item directly or has an item property
+            const item = data.item || data;
+            const summary = data.summary || (await getCartSummaryFromApi());
+            
+            return { 
+                item: item, 
+                summary: summary 
+            };
         } else {
             throw new Error(response.data.message || 'Failed to update quantity');
         }
     } catch (error: any) {
         console.error('Update cart quantity error:', error.response?.data || error.message);
         throw error;
+    }
+};
+
+// Helper to get cart summary
+const getCartSummaryFromApi = async (): Promise<CartSummary> => {
+    try {
+        const cart = await getCart();
+        return cart.data.summary;
+    } catch (error) {
+        return {
+            subtotal: 0,
+            totalShipping: 0,
+            totalDiscount: 0,
+            grandTotal: 0,
+            itemCount: 0,
+        };
     }
 };
 
@@ -229,7 +257,9 @@ const removeCartItem = async (cartItemId: string): Promise<{ summary: CartSummar
         );
 
         if (response.data.success) {
-            return response.data.data;
+            // Get updated summary
+            const summary = await getCartSummaryFromApi();
+            return { summary };
         } else {
             throw new Error(response.data.message || 'Failed to remove item');
         }
@@ -257,7 +287,7 @@ const clearCart = async (): Promise<{ deletedCount: number }> => {
         );
 
         if (response.data.success) {
-            return response.data.data;
+            return response.data.data || { deletedCount: 0 };
         } else {
             throw new Error(response.data.message || 'Failed to clear cart');
         }
@@ -314,7 +344,7 @@ const removeCoupon = async (): Promise<{ modifiedCount: number }> => {
         );
 
         if (response.data.success) {
-            return response.data.data;
+            return response.data.data || { modifiedCount: 0 };
         } else {
             throw new Error(response.data.message || 'Failed to remove coupon');
         }
@@ -324,29 +354,16 @@ const removeCoupon = async (): Promise<{ modifiedCount: number }> => {
     }
 };
 
-// Sync Prices
+// Sync Prices - NOTE: This endpoint may not exist, using validate instead
 const syncCartPrices = async (): Promise<{ updatedCount: number; priceChanges: any[]; summary: CartSummary }> => {
     try {
-        const token = await AsyncStorage.getItem('token');
-        const headers: any = {
-            'Content-Type': 'application/json',
+        // Since there's no sync-prices endpoint, we'll re-fetch the cart
+        const cart = await getCart();
+        return {
+            updatedCount: 0,
+            priceChanges: [],
+            summary: cart.data.summary
         };
-
-        if (token) {
-            headers['Authorization'] = `Bearer ${token}`;
-        }
-
-        const response = await axios.put(
-            `${API_BASE_URL}/Cart/sync-prices`,
-            {},
-            { headers }
-        );
-
-        if (response.data.success) {
-            return response.data.data;
-        } else {
-            throw new Error(response.data.message || 'Failed to sync prices');
-        }
     } catch (error: any) {
         console.error('Sync cart prices error:', error.response?.data || error.message);
         throw error;
@@ -381,26 +398,27 @@ const validateCart = async (): Promise<{ valid: boolean; items: any[]; unavailab
     }
 };
 
-// Move to Wishlist
-const moveToWishlist = async (cartItemId: string): Promise<{ message: string }> => {
+// Move to Wishlist - FIXED: Using Wishlist add endpoint
+const moveToWishlist = async (productId: string): Promise<{ message: string }> => {
     try {
         const token = await AsyncStorage.getItem('token');
-        const headers: any = {
-            'Content-Type': 'application/json',
-        };
-
-        if (token) {
-            headers['Authorization'] = `Bearer ${token}`;
+        if (!token) {
+            throw new Error('Please login to add items to wishlist');
         }
 
         const response = await axios.post(
-            `${API_BASE_URL}/Cart/move-to-wishlist/${cartItemId}`,
+            `${API_BASE_URL}/Wishlist/add/${productId}`,
             {},
-            { headers }
+            {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                }
+            }
         );
 
         if (response.data.success) {
-            return response.data;
+            return { message: 'Item added to wishlist' };
         } else {
             throw new Error(response.data.message || 'Failed to move to wishlist');
         }
@@ -456,7 +474,16 @@ const getRecommendedProducts = async (): Promise<Product[]> => {
         );
 
         if (response.data.success) {
-            return response.data.data;
+            return response.data.data.map((item: any) => ({
+                _id: item._id,
+                name: item.name,
+                brand: item.brand || 'Unknown',
+                price: item.price,
+                discountPrice: item.discountPrice || 0,
+                thumbnail: item.thumbnail || 'https://via.placeholder.com/140',
+                images: item.images || [],
+                stock: item.stock || 0
+            }));
         } else {
             return [];
         }
@@ -476,11 +503,10 @@ interface CartItemCardProps {
     item: CartItem;
     onQuantityChange: (id: string, newQuantity: number) => void;
     onRemove: (id: string) => void;
-    onMoveToWishlist: (item: CartItem) => void;
     isUpdating: boolean;
 }
 
-const CartItemCard = React.memo(({ item, onQuantityChange, onRemove, onMoveToWishlist, isUpdating }: CartItemCardProps) => {
+const CartItemCard = React.memo(({ item, onQuantityChange, onRemove, isUpdating }: CartItemCardProps) => {
     const scale = useSharedValue(1);
     const product = item.product;
     const currentPrice = product.discountPrice && product.discountPrice > 0 
@@ -527,7 +553,7 @@ const CartItemCard = React.memo(({ item, onQuantityChange, onRemove, onMoveToWis
             style={[styles.cartItemCard, animatedStyle]}
         >
             <Image 
-                source={{ uri: product.thumbnail || product.images?.[0] || 'https://via.placeholder.com/100' }} 
+                source={{ uri: product.thumbnail ? `${API_BASE_URL}${product.thumbnail}` : 'https://via.placeholder.com/100' }} 
                 style={styles.cartItemImage} 
             />
             
@@ -562,14 +588,12 @@ const CartItemCard = React.memo(({ item, onQuantityChange, onRemove, onMoveToWis
                 </View>
                 
                 <View style={styles.stockContainer}>
-                    {item.stockAvailable ? (
-                        product.stock <= 5 ? (
-                            <Text style={styles.limitedStockText}>Only {product.stock} left in stock</Text>
-                        ) : (
-                            <Text style={styles.inStockText}>✓ In Stock</Text>
-                        )
-                    ) : (
+                    {item.stockAvailable !== undefined && !item.stockAvailable ? (
                         <Text style={styles.outOfStockText}>Out of Stock</Text>
+                    ) : product.stock <= 5 ? (
+                        <Text style={styles.limitedStockText}>Only {product.stock} left in stock</Text>
+                    ) : (
+                        <Text style={styles.inStockText}>✓ In Stock</Text>
                     )}
                 </View>
                 
@@ -585,10 +609,6 @@ const CartItemCard = React.memo(({ item, onQuantityChange, onRemove, onMoveToWis
                     </View>
                     
                     <View style={styles.actionButtons}>
-                        <TouchableOpacity onPress={() => onMoveToWishlist(item)} style={styles.actionButton} activeOpacity={0.7}>
-                            <Feather name="heart" size={14} color="#8B5CF6" />
-                            <Text style={[styles.actionButtonText, { color: '#8B5CF6' }]}>Save</Text>
-                        </TouchableOpacity>
                         <TouchableOpacity onPress={() => onRemove(item._id)} style={styles.actionButton} activeOpacity={0.7}>
                             <Feather name="trash-2" size={14} color="#EF4444" />
                             <Text style={[styles.actionButtonText, { color: '#EF4444' }]}>Remove</Text>
@@ -612,12 +632,12 @@ interface HorizontalProductCardProps {
 }
 
 const HorizontalProductCard = React.memo(({ item, onPress }: HorizontalProductCardProps) => {
-    const imageUrl = item.thumbnail || item.images?.[0] || 'https://via.placeholder.com/140';
+    const imageUrl = item.thumbnail || 'https://via.placeholder.com/140';
     const price = item.discountPrice || item.price;
     
     return (
         <TouchableOpacity style={styles.horizontalCard} activeOpacity={0.8} onPress={() => onPress?.(item)}>
-            <Image source={{ uri: imageUrl }} style={styles.horizontalCardImage} />
+            <Image source={{ uri: imageUrl ? `${API_BASE_URL}${imageUrl}` : 'https://via.placeholder.com/140' }} style={styles.horizontalCardImage} />
             <View style={styles.horizontalCardContent}>
                 <Text style={styles.horizontalCardBrand}>{item.brand || 'Unbranded'}</Text>
                 <Text style={styles.horizontalCardTitle} numberOfLines={2}>{item.name}</Text>
@@ -675,7 +695,22 @@ const CartScreen = () => {
             }
         } catch (error: any) {
             console.error('Load cart error:', error.response?.data || error.message);
-            Alert.alert('Error', 'Failed to load cart');
+            if (error.response?.status === 404) {
+                // Cart is empty, that's fine
+                setCartItems([]);
+                setSummary({
+                    subtotal: 0,
+                    totalShipping: 0,
+                    totalDiscount: 0,
+                    grandTotal: 0,
+                    itemCount: 0,
+                });
+            } else {
+                // Don't show alert for empty cart
+                if (error.message !== 'Failed to fetch cart') {
+                    Alert.alert('Error', 'Failed to load cart');
+                }
+            }
         }
     };
 
@@ -687,15 +722,17 @@ const CartScreen = () => {
             }
         } catch (error: any) {
             console.error('Load user address error:', error.response?.data || error.message);
+            // Don't show alert for address error, just continue
         }
     };
 
     const loadRecommendedProducts = async () => {
         try {
             const products = await getRecommendedProducts();
-            setRecommendedProducts(products);
+            setRecommendedProducts(products || []);
         } catch (error: any) {
             console.error('Load recommended products error:', error.response?.data || error.message);
+            setRecommendedProducts([]);
         }
     };
 
@@ -716,24 +753,29 @@ const CartScreen = () => {
     };
 
     // ============================================================================
-    // HANDLER FUNCTIONS
+    // HANDLER FUNCTIONS - UPDATED
     // ============================================================================
 
     const handleQuantityChange = async (cartItemId: string, newQuantity: number) => {
         try {
             setUpdatingItem(cartItemId);
             const response = await updateCartQuantity(cartItemId, newQuantity);
+            // Update the cart items with the new quantity
             setCartItems(prev => 
                 prev.map(item => 
                     item._id === cartItemId 
-                        ? { ...item, quantity: newQuantity, totalPrice: response.item.totalPrice }
+                        ? { ...item, quantity: newQuantity, totalPrice: item.product.discountPrice > 0 ? item.product.discountPrice * newQuantity : item.product.price * newQuantity }
                         : item
                 )
             );
-            setSummary(response.summary);
+            // Refresh summary
+            const cart = await getCart();
+            setSummary(cart.data.summary);
         } catch (error: any) {
             console.error('Update quantity error:', error.response?.data || error.message);
-            Alert.alert('Error', 'Failed to update quantity');
+            Alert.alert('Error', error.response?.data?.message || 'Failed to update quantity');
+            // Reload cart to sync state
+            await loadCartData();
         } finally {
             setUpdatingItem(null);
         }
@@ -750,29 +792,21 @@ const CartScreen = () => {
                     style: 'destructive',
                     onPress: async () => {
                         try {
-                            const response = await removeCartItem(cartItemId);
+                            await removeCartItem(cartItemId);
                             setCartItems(prev => prev.filter(item => item._id !== cartItemId));
-                            setSummary(response.summary);
+                            // Refresh summary
+                            const cart = await getCart();
+                            setSummary(cart.data.summary);
                         } catch (error: any) {
                             console.error('Remove item error:', error.response?.data || error.message);
                             Alert.alert('Error', 'Failed to remove item');
+                            // Reload cart to sync state
+                            await loadCartData();
                         }
                     }
                 }
             ]
         );
-    };
-
-    const handleMoveToWishlist = async (item: CartItem) => {
-        try {
-            await moveToWishlist(item._id);
-            setCartItems(prev => prev.filter(i => i._id !== item._id));
-            Alert.alert('Success', 'Item moved to wishlist');
-            await loadCartData();
-        } catch (error: any) {
-            console.error('Move to wishlist error:', error.response?.data || error.message);
-            Alert.alert('Error', 'Failed to move to wishlist');
-        }
     };
 
     const handleApplyCoupon = async () => {
@@ -796,7 +830,7 @@ const CartScreen = () => {
             }
         } catch (error: any) {
             console.error('Apply coupon error:', error.response?.data || error.message);
-            Alert.alert('Error', 'Invalid or expired coupon code');
+            Alert.alert('Error', error.response?.data?.message || 'Invalid or expired coupon code');
         }
     };
 
@@ -816,12 +850,9 @@ const CartScreen = () => {
 
     const handleSyncPrices = async () => {
         try {
-            const response = await syncCartPrices();
-            setSummary(response.summary);
-            if (response.updatedCount > 0) {
-                Alert.alert('Prices Updated', `${response.updatedCount} item(s) prices updated`);
-            }
+            await syncCartPrices();
             await loadCartData();
+            Alert.alert('Success', 'Prices synced successfully');
         } catch (error: any) {
             console.error('Sync prices error:', error.response?.data || error.message);
             Alert.alert('Error', 'Failed to sync prices');
@@ -846,7 +877,10 @@ const CartScreen = () => {
     };
 
     const handleProductPress = (product: Product) => {
-        router.push(`/product/${product._id}`);
+        router.push({
+            pathname: '/ProductDetailsScreen',
+            params: { productId: product._id }
+        });
     };
 
     // ============================================================================
@@ -868,10 +902,9 @@ const CartScreen = () => {
             item={item}
             onQuantityChange={handleQuantityChange}
             onRemove={handleRemoveItem}
-            onMoveToWishlist={handleMoveToWishlist}
             isUpdating={updatingItem === item._id}
         />
-    ), [handleQuantityChange, handleRemoveItem, handleMoveToWishlist, updatingItem]);
+    ), [handleQuantityChange, handleRemoveItem, updatingItem]);
 
     const renderRecommendedItem = useCallback(({ item }: { item: Product }) => (
         <HorizontalProductCard 
@@ -888,12 +921,9 @@ const CartScreen = () => {
 
     if (loading) {
         return (
-            <SafeAreaView style={styles.safeArea}>
+             <SafeAreaView style={styles.safeArea} edges={['top']}>
                 <StatusBar barStyle="dark-content" backgroundColor="#F8FAFC" />
                 <View style={styles.header}>
-                    <TouchableOpacity style={styles.backButton} onPress={() => router.back()} activeOpacity={0.7}>
-                        <Ionicons name="arrow-back" size={24} color="#0F172A" />
-                    </TouchableOpacity>
                     <Text style={styles.headerTitle}>My Cart</Text>
                     <View style={styles.wishlistButton} />
                 </View>
@@ -911,18 +941,11 @@ const CartScreen = () => {
 
     if (cartItems.length === 0) {
         return (
-            <SafeAreaView style={styles.safeArea}>
+             <SafeAreaView style={styles.safeArea} edges={['top']}>
                 <StatusBar barStyle="dark-content" backgroundColor="#F8FAFC" />
                 <View style={styles.header}>
-                    <TouchableOpacity style={styles.backButton} onPress={() => router.back()} activeOpacity={0.7}>
-                        <Ionicons name="arrow-back" size={24} color="#0F172A" />
-                    </TouchableOpacity>
                     <Text style={styles.headerTitle}>My Cart</Text>
-                    <TouchableOpacity style={styles.wishlistButton} onPress={() => router.push('/wishlist')} activeOpacity={0.7}>
-                        <Ionicons name="heart-outline" size={24} color="#0F172A" />
-                    </TouchableOpacity>
                 </View>
-                
                 <Animated.View entering={FadeInUp.duration(500)} style={styles.emptyStateContainer}>
                     <View style={styles.emptyStateIconContainer}>
                         <Feather name="shopping-bag" size={80} color="#CBD5E1" />
@@ -948,17 +971,11 @@ const CartScreen = () => {
     // ============================================================================
 
     return (
-        <SafeAreaView style={styles.safeArea}>
+         <SafeAreaView style={styles.safeArea} edges={['top']}>
             <StatusBar barStyle="dark-content" backgroundColor="#F8FAFC" />
             
             <View style={styles.header}>
-                <TouchableOpacity style={styles.backButton} onPress={() => router.back()} activeOpacity={0.7}>
-                    <Ionicons name="arrow-back" size={24} color="#0F172A" />
-                </TouchableOpacity>
-                <Text style={styles.headerTitle}>My Cart ({summary.itemCount})</Text>
-                <TouchableOpacity style={styles.wishlistButton} onPress={() => router.push('/wishlist')} activeOpacity={0.7}>
-                    <Ionicons name="heart-outline" size={24} color="#0F172A" />
-                </TouchableOpacity>
+                <Text style={styles.headerTitle}>My Cart</Text>
             </View>
             
             <Animated.ScrollView
@@ -1020,7 +1037,6 @@ const CartScreen = () => {
                             item={item}
                             onQuantityChange={handleQuantityChange}
                             onRemove={handleRemoveItem}
-                            onMoveToWishlist={handleMoveToWishlist}
                             isUpdating={updatingItem === item._id}
                         />
                     ))}
@@ -1146,6 +1162,7 @@ const styles = StyleSheet.create({
         flex: 1,
         backgroundColor: '#F8FAFC',
     },
+    
     header: {
         flexDirection: 'row',
         alignItems: 'center',

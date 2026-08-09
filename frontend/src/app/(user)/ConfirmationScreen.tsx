@@ -25,6 +25,7 @@ import Animated, {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Icon from 'react-native-vector-icons/Feather';
 import MaterialIcon from 'react-native-vector-icons/MaterialIcons';
+import { router, useFocusEffect } from 'expo-router';
 
 const { width } = Dimensions.get('window');
 
@@ -137,7 +138,6 @@ const MOCK_ORDER: OrderSummary = {
 };
 
 // Components
-const AnimatedTouchable = Animated.createAnimatedComponent(TouchableOpacity);
 
 const SuccessAnimation: React.FC = () => {
     const checkmarkScale = useSharedValue(0);
@@ -186,7 +186,6 @@ const OrderStatusCard: React.FC<{ order: OrderSummary }> = ({ order }) => {
     return (
         <Animated.View entering={FadeInDown.delay(300)} style={styles.statusCard}>
             <Text style={styles.statusCardTitle}>Order Status</Text>
-            <View style={styles.timelineContainer}>
                 {statuses.map((status, index) => (
                     <View key={status} style={styles.timelineItem}>
                         <View style={styles.timelineLeft}>
@@ -230,172 +229,12 @@ const OrderStatusCard: React.FC<{ order: OrderSummary }> = ({ order }) => {
                         </View>
                     </View>
                 ))}
-            </View>
-
-            <View style={styles.deliveryEstimate}>
-                <Icon name="calendar" size={16} color="#2563EB" />
-                <Text style={styles.deliveryEstimateText}>
-                    Estimated Delivery: {order.estimatedDelivery}
-                </Text>
-            </View>
+            
         </Animated.View>
     );
 };
 
-const OrderSummaryCard: React.FC<{ order: OrderSummary }> = ({ order }) => {
-    const [expanded, setExpanded] = React.useState(false);
 
-    return (
-        <Animated.View entering={FadeInDown.delay(400)} style={styles.summaryCard}>
-            <TouchableOpacity
-                style={styles.summaryHeader}
-                onPress={() => setExpanded(!expanded)}
-            >
-                <View style={styles.summaryHeaderLeft}>
-                    <MaterialIcon name="receipt" size={20} color="#2563EB" />
-                    <Text style={styles.summaryTitle}>Order Summary</Text>
-                </View>
-                <Icon name={expanded ? 'chevron-up' : 'chevron-down'} size={20} color="#64748B" />
-            </TouchableOpacity>
-
-            {expanded && (
-                <Animated.View entering={FadeIn}>
-                    <View style={styles.orderIdContainer}>
-                        <Text style={styles.orderIdLabel}>Order ID</Text>
-                        <Text style={styles.orderIdValue}>{order.orderId}</Text>
-                        <TouchableOpacity
-                            onPress={() => {
-                                Share.share({
-                                    message: `My Order ID: ${order.orderId}\nTotal: ₹${order.grandTotal.toLocaleString()}`,
-                                });
-                            }}
-                        >
-                            <Icon name="share-2" size={16} color="#2563EB" />
-                        </TouchableOpacity>
-                    </View>
-
-                    {order.items.map((item, index) => (
-                        <View key={item.id} style={styles.orderItem}>
-                            <View style={styles.orderItemDetails}>
-                                <Text style={styles.orderItemName}>{item.name}</Text>
-                                {item.size && (
-                                    <Text style={styles.orderItemMeta}>Size: {item.size}</Text>
-                                )}
-                                {item.color && (
-                                    <Text style={styles.orderItemMeta}>Color: {item.color}</Text>
-                                )}
-                                <Text style={styles.orderItemPrice}>
-                                    ₹{item.price.toLocaleString()} x {item.quantity}
-                                </Text>
-                            </View>
-                            <Text style={styles.orderItemTotal}>
-                                ₹{(item.price * item.quantity).toLocaleString()}
-                            </Text>
-                        </View>
-                    ))}
-
-                    <View style={styles.divider} />
-
-                    <View style={styles.billingRow}>
-                        <Text style={styles.billingLabel}>Subtotal</Text>
-                        <Text style={styles.billingValue}>₹{order.subtotal.toLocaleString()}</Text>
-                    </View>
-                    {order.discount > 0 && (
-                        <View style={styles.billingRow}>
-                            <Text style={[styles.billingLabel, styles.discountLabel]}>
-                                Discount
-                            </Text>
-                            <Text style={[styles.billingValue, styles.discountValue]}>
-                                -₹{order.discount.toLocaleString()}
-                            </Text>
-                        </View>
-                    )}
-                    {order.couponDiscount > 0 && (
-                        <View style={styles.billingRow}>
-                            <Text style={[styles.billingLabel, styles.couponLabel]}>
-                                Coupon Discount
-                            </Text>
-                            <Text style={[styles.billingValue, styles.couponValue]}>
-                                -₹{order.couponDiscount.toLocaleString()}
-                            </Text>
-                        </View>
-                    )}
-                    <View style={styles.billingRow}>
-                        <Text style={styles.billingLabel}>Shipping</Text>
-                        <Text style={styles.billingValue}>
-                            {order.shippingFee === 0 ? 'Free' : `₹${order.shippingFee}`}
-                        </Text>
-                    </View>
-                    <View style={styles.billingRow}>
-                        <Text style={styles.billingLabel}>Tax (GST)</Text>
-                        <Text style={styles.billingValue}>₹{order.tax.toLocaleString()}</Text>
-                    </View>
-                    <View style={styles.billingRow}>
-                        <Text style={styles.billingLabel}>Platform Fee</Text>
-                        <Text style={styles.billingValue}>₹{order.platformFee.toLocaleString()}</Text>
-                    </View>
-
-                    <View style={styles.divider} />
-
-                    <View style={styles.totalRow}>
-                        <Text style={styles.totalLabel}>Grand Total</Text>
-                        <Text style={styles.totalValue}>₹{order.grandTotal.toLocaleString()}</Text>
-                    </View>
-
-                    <View style={styles.paymentMethodContainer}>
-                        <Icon name="credit-card" size={16} color="#10B981" />
-                        <Text style={styles.paymentMethodText}>
-                            Paid via {order.paymentMethod}
-                        </Text>
-                    </View>
-                </Animated.View>
-            )}
-        </Animated.View>
-    );
-};
-
-const DeliveryAddressCard: React.FC<{ address: DeliveryAddress }> = ({ address }) => (
-    <Animated.View entering={FadeInDown.delay(500)} style={styles.deliveryCard}>
-        <View style={styles.deliveryHeader}>
-            <View style={styles.deliveryHeaderLeft}>
-                <Icon name="map-pin" size={20} color="#2563EB" />
-                <Text style={styles.deliveryTitle}>Delivery Address</Text>
-            </View>
-            <TouchableOpacity>
-                <Text style={styles.trackButton}>Track Order</Text>
-            </TouchableOpacity>
-        </View>
-        <Text style={styles.deliveryName}>{address.name}</Text>
-        <Text style={styles.deliveryPhone}>{address.phone}</Text>
-        <Text style={styles.deliveryAddress}>
-            {address.addressLine}, {address.city}, {address.state} - {address.pinCode}
-        </Text>
-        {address.landmark && (
-            <Text style={styles.deliveryLandmark}>Landmark: {address.landmark}</Text>
-        )}
-    </Animated.View>
-);
-
-const ActionButtons: React.FC<{ onTrack: () => void; onShare: () => void; onHome: () => void }> = ({
-    onTrack,
-    onShare,
-    onHome,
-}) => (
-    <Animated.View entering={FadeInUp.delay(600)} style={styles.actionButtonsContainer}>
-        <TouchableOpacity style={styles.actionButton} onPress={onTrack}>
-            <Icon name="map" size={20} color="#2563EB" />
-            <Text style={styles.actionButtonText}>Track</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.actionButton} onPress={onShare}>
-            <Icon name="share-2" size={20} color="#2563EB" />
-            <Text style={styles.actionButtonText}>Share</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.actionButton} onPress={onHome}>
-            <Icon name="home" size={20} color="#2563EB" />
-            <Text style={styles.actionButtonText}>Home</Text>
-        </TouchableOpacity>
-    </Animated.View>
-);
 
 const NextStepsCard: React.FC = () => (
     <Animated.View entering={FadeInDown.delay(650)} style={styles.nextStepsCard}>
@@ -436,38 +275,6 @@ const NextStepsCard: React.FC = () => (
     </Animated.View>
 );
 
-const RecommendedSection: React.FC = () => {
-    const recommendations = [
-        { id: '1', name: 'Wireless Earbuds', price: 2999, rating: 4.5 },
-        { id: '2', name: 'Phone Case', price: 999, rating: 4.2 },
-        { id: '3', name: 'Fast Charger', price: 1499, rating: 4.3 },
-    ];
-
-    return (
-        <Animated.View entering={FadeInDown.delay(700)} style={styles.recommendedCard}>
-            <Text style={styles.recommendedTitle}>You May Also Like</Text>
-            <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.recommendedScroll}
-            >
-                {recommendations.map((item) => (
-                    <TouchableOpacity key={item.id} style={styles.recommendedItem}>
-                        <View style={styles.recommendedItemImage}>
-                            <Icon name="shopping-bag" size={32} color="#CBD5E1" />
-                        </View>
-                        <Text style={styles.recommendedItemName}>{item.name}</Text>
-                        <Text style={styles.recommendedItemPrice}>₹{item.price}</Text>
-                        <View style={styles.recommendedRating}>
-                            <Icon name="star" size={12} color="#F59E0B" />
-                            <Text style={styles.recommendedRatingText}>{item.rating}</Text>
-                        </View>
-                    </TouchableOpacity>
-                ))}
-            </ScrollView>
-        </Animated.View>
-    );
-};
 
 const CustomerSupportCard: React.FC = () => (
     <Animated.View entering={FadeInDown.delay(750)} style={styles.supportCard}>
@@ -518,9 +325,9 @@ const ConfirmationScreen: React.FC<{ navigation: any; route?: any }> = ({ naviga
         });
     }, [order]);
 
-    const handleGoToHome = useCallback(() => {
-        navigation.navigate('Home');
-    }, [navigation]);
+    const handleGoToHome = () => {
+        router.push('/');
+    }
 
     const handleDownloadInvoice = useCallback(() => {
         Alert.alert('Download Invoice', 'Invoice will be downloaded shortly');
@@ -532,7 +339,7 @@ const ConfirmationScreen: React.FC<{ navigation: any; route?: any }> = ({ naviga
                 <StatusBar barStyle="dark-content" backgroundColor="#F8FAFC" />
 
                 <Animated.View entering={FadeIn.delay(200)} style={styles.header}>
-                    <TouchableOpacity style={styles.headerButton} onPress={() => navigation.goBack()}>
+                    <TouchableOpacity style={styles.headerButton} onPress={() => router.back()}>
                         <Icon name="arrow-left" size={24} color="#0F172A" />
                     </TouchableOpacity>
                     <Text style={styles.headerTitle}>Order Confirmed!</Text>
@@ -567,24 +374,8 @@ const ConfirmationScreen: React.FC<{ navigation: any; route?: any }> = ({ naviga
                     {/* Order Status Timeline */}
                     <OrderStatusCard order={order} />
 
-                    {/* Order Summary */}
-                    <OrderSummaryCard order={order} />
-
-                    {/* Delivery Address */}
-                    <DeliveryAddressCard address={order.deliveryAddress} />
-
-                    {/* Action Buttons */}
-                    <ActionButtons
-                        onTrack={handleTrackOrder}
-                        onShare={handleShareOrder}
-                        onHome={handleGoToHome}
-                    />
-
                     {/* Next Steps */}
                     <NextStepsCard />
-
-                    {/* Recommended Products */}
-                    <RecommendedSection />
 
                     {/* Customer Support */}
                     <CustomerSupportCard />
@@ -614,7 +405,7 @@ const ConfirmationScreen: React.FC<{ navigation: any; route?: any }> = ({ naviga
                 {/* Sticky Bottom Bar */}
                 <Animated.View entering={SlideInUp.delay(500)} style={styles.stickyBar}>
                     <TouchableOpacity style={styles.continueShoppingButton} onPress={handleGoToHome}>
-                        <Icon name="shopping-bag" size={20} color="#FFFFFF" />
+                        <Icon name="bag" size={20} color="#FFFFFF" />
                         <Text style={styles.continueShoppingText}>Continue Shopping</Text>
                     </TouchableOpacity>
                 </Animated.View>
@@ -844,9 +635,7 @@ const styles = StyleSheet.create({
         color: '#0F172A',
         marginBottom: 16,
     },
-    timelineContainer: {
-        marginBottom: 16,
-    },
+   
     timelineItem: {
         flexDirection: 'row',
         marginBottom: 12,

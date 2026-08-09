@@ -161,7 +161,7 @@ interface TrackResponse {
 // 2. API SERVICE
 // ============================================
 
-const API_BASE_URL = 'http://192.168.0.103:5000';
+const API_BASE_URL = 'http://10.225.180.27:5000';
 
 const getAuthToken = async (): Promise<string | null> => {
   try {
@@ -513,7 +513,7 @@ const OrderSummaryCard: React.FC<{ order: Order }> = ({ order }) => {
   return (
     <Animated.View entering={FadeInUp.delay(350)} style={styles.summaryCard}>
       <View style={styles.cardHeader}>
-        <Icon name="shopping-bag" size={18} color="#0F172A" />
+        <Icon name="bag" size={18} color="#0F172A" />
         <Text style={styles.cardTitle}>Order Summary</Text>
       </View>
       

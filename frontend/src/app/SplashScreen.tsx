@@ -7,7 +7,6 @@ import {
     AccessibilityInfo,
     Dimensions,
     Platform,
-    SafeAreaView,
     StatusBar,
     Text,
     View,
@@ -62,38 +61,33 @@ const typography = {
 };
 
 // ============================================================================
-// COLOR SYSTEM - Premium Color Palette
+// COLOR SYSTEM - Premium Color Palette (Matches Login Screen)
 // ============================================================================
 
 const colors = {
-    // Primary Brand Colors - Luxury Gradient
-    primaryStart: '#667eea',
-    primaryEnd: '#764ba2',
-    primary: '#5B3A8C',      // Royal Purple - Premium feel
-    primaryLight: '#8B5CF6',  // Vibrant Purple
-    secondary: '#EC4899',     // Hot Pink - Modern accent
-    accent: '#F59E0B',        // Amber - Luxury touch
+    // Primary Brand Colors - Matches Login Screen
+    primary: '#2563EB',      // Blue - Matches Login screen
+    primaryLight: '#60A5FA', // Light Blue
+    primaryDark: '#1D4ED8',  // Dark Blue
+    secondary: '#4F46E5',    // Indigo
+    secondaryLight: '#818CF8',
 
     // Neutrals
     background: '#FFFFFF',
-    backgroundGradient: ['#FFFFFF', '#F3F4F6'],
-    textPrimary: '#1F2937',   // Dark gray for elegance
+    textPrimary: '#111827',   // Dark gray for elegance
     textSecondary: '#6B7280',  // Soft gray for tagline
-    textLight: '#9CA3AF',
-    border: '#E5E7EB',
-
-    // Premium Card Background
-    surface: '#FFFFFF',
-    surfaceElevated: '#F9FAFB',
+    textTertiary: '#9CA3AF',
+    textOnPrimary: '#FFFFFF',
 
     // Loading indicator
     loaderInactive: '#E5E7EB',
-    loaderActive: '#8B5CF6',
-    loaderAccent: '#EC4899',
+    loaderActive: '#2563EB',   // Matches primary color
+    loaderAccent: '#4F46E5',   // Matches secondary color
+    loaderLight: '#60A5FA',
 };
 
 // ============================================================================
-// PREMIUM LOGO COMPONENT - With Gradient and Shadow Effects
+// PREMIUM LOGO COMPONENT - Matches Login Screen Logo
 // ============================================================================
 
 const PremiumLogoIcon: React.FC = () => {
@@ -108,16 +102,15 @@ const PremiumLogoIcon: React.FC = () => {
                 style={{
                     width: 100,
                     height: 100,
-                    borderRadius: 30,
+                    borderRadius: 50,
                     backgroundColor: colors.primary,
                     alignItems: 'center',
                     justifyContent: 'center',
-                    shadowColor: colors.primaryLight,
+                    shadowColor: colors.primary,
                     shadowOffset: { width: 0, height: 8 },
-                    shadowOpacity: 0.3,
+                    shadowOpacity: 0.25,
                     shadowRadius: 20,
                     elevation: 12,
-                    overflow: 'hidden',
                 }}
             >
                 {/* Inner gradient effect */}
@@ -130,42 +123,35 @@ const PremiumLogoIcon: React.FC = () => {
                         bottom: -50,
                         backgroundColor: colors.primaryLight,
                         opacity: 0.1,
+                        borderRadius: 50,
                     }}
                 />
                 
-                {/* Premium Crown Icon for luxury feel */}
+                {/* Shopping Bag Icon - Matches Login Screen exactly */}
                 <View style={{ alignItems: 'center', justifyContent: 'center' }}>
-                    {/* Crown Shape */}
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                        <View style={{ width: 10, height: 10, backgroundColor: '#FFFFFF', borderRadius: 10, transform: [{ rotate: '45deg' }] }} />
-                        <View style={{ width: 14, height: 14, backgroundColor: '#FFFFFF', borderRadius: 14, transform: [{ rotate: '45deg' }] }} />
-                        <View style={{ width: 10, height: 10, backgroundColor: '#FFFFFF', borderRadius: 10, transform: [{ rotate: '45deg' }] }} />
-                    </View>
-                    
-                    {/* Shopping Bag Icon */}
                     <View
                         style={{
                             width: 40,
                             height: 48,
                             borderWidth: 2.5,
                             borderColor: '#FFFFFF',
-                            borderRadius: 14,
-                            borderBottomLeftRadius: 20,
-                            borderBottomRightRadius: 20,
+                            borderRadius: 8,
+                            borderBottomLeftRadius: 14,
+                            borderBottomRightRadius: 14,
                             marginTop: 4,
                         }}
                     />
                     <View
                         style={{
                             position: 'absolute',
-                            top: -2,
+                            top: -6,
                             width: 22,
                             height: 12,
                             borderWidth: 2,
                             borderColor: '#FFFFFF',
                             borderBottomWidth: 0,
-                            borderTopLeftRadius: 12,
-                            borderTopRightRadius: 12,
+                            borderTopLeftRadius: 6,
+                            borderTopRightRadius: 6,
                         }}
                     />
                     {/* Handle */}
@@ -174,10 +160,10 @@ const PremiumLogoIcon: React.FC = () => {
                             position: 'absolute',
                             top: -8,
                             width: 14,
-                            height: 8,
-                            borderWidth: 2,
+                            height: 7,
+                            borderWidth: 1.5,
                             borderColor: '#FFFFFF',
-                            borderRadius: 8,
+                            borderRadius: 6,
                             borderBottomWidth: 0,
                         }}
                     />
@@ -246,7 +232,7 @@ const PremiumLoadingIndicator: React.FC = () => {
     const dot3Style = useAnimatedStyle(() => ({
         opacity: interpolate(pulse3.value, [0.3, 1], [0.4, 1], Extrapolate.CLAMP),
         transform: [{ scale: interpolate(pulse3.value, [0.3, 1], [0.8, 1.2], Extrapolate.CLAMP) }],
-        backgroundColor: colors.primaryLight,
+        backgroundColor: colors.loaderLight,
     }));
 
     return (
@@ -308,7 +294,7 @@ const SplashScreen: React.FC<SplashScreenProps> = ({ onAnimationComplete }) => {
     // Animation values
     const logoScale = useSharedValue(0.6);
     const logoOpacity = useSharedValue(0);
-    const logoRotation = useSharedValue(0); // New rotation value
+    const logoRotation = useSharedValue(0);
     const brandTranslateY = useSharedValue(30);
     const brandOpacity = useSharedValue(0);
     const taglineTranslateY = useSharedValue(20);
@@ -393,12 +379,12 @@ const SplashScreen: React.FC<SplashScreenProps> = ({ onAnimationComplete }) => {
     // Accessibility: announce when screen is ready
     useEffect(() => {
         if (Platform.OS !== 'web') {
-            AccessibilityInfo.announceForAccessibility('Welcome to Roy Shop. Premium luxury shopping experience loading.');
+            AccessibilityInfo.announceForAccessibility('Welcome to Shoply. Premium luxury shopping experience loading.');
         }
     }, []);
 
     return (
-        <SafeAreaView style={styles.safeArea}>
+        <View style={{ flex: 1, backgroundColor: colors.background }}>
             <StatusBar
                 barStyle="dark-content"
                 backgroundColor={colors.background}
@@ -422,11 +408,11 @@ const SplashScreen: React.FC<SplashScreenProps> = ({ onAnimationComplete }) => {
                     <Animated.View style={[styles.brandContainer, brandAnimatedStyle]}>
                         <Text
                             style={[styles.brandName, typography.brandName]}
-                            accessibilityLabel="Brand name: Roy Shop"
+                            accessibilityLabel="Brand name: Shoply"
                             accessibilityRole="header"
                             maxFontSizeMultiplier={1.2}
                         >
-                            ROY SHOP
+                            SHOPLY
                         </Text>
                         {/* Premium underline accent */}
                         <View style={styles.brandUnderline} />
@@ -449,7 +435,7 @@ const SplashScreen: React.FC<SplashScreenProps> = ({ onAnimationComplete }) => {
                     <PremiumLoadingIndicator />
                 </View>
             </View>
-        </SafeAreaView>
+        </View>
     );
 };
 
@@ -458,10 +444,6 @@ const SplashScreen: React.FC<SplashScreenProps> = ({ onAnimationComplete }) => {
 // ============================================================================
 
 const styles = {
-    safeArea: {
-        flex: 1,
-        backgroundColor: colors.background,
-    },
     container: {
         flex: 1,
         backgroundColor: colors.background,
@@ -494,19 +476,19 @@ const styles = {
         width: SCREEN_WIDTH * 0.3,
         height: SCREEN_WIDTH * 0.3,
         borderRadius: SCREEN_WIDTH * 0.15,
-        backgroundColor: colors.accent,
+        backgroundColor: colors.primaryDark,
         opacity: 0.03,
     },
     centerContainer: {
         flex: 1,
         justifyContent: 'center',
         alignItems: 'center',
+        gap:20,
         paddingHorizontal: 24,
-        // Margin bottom to balance with loading indicator
         marginBottom: -40,
     },
     brandContainer: {
-        marginTop: 28,
+        marginTop: 40,
         alignItems: 'center',
     },
     brandName: {
@@ -527,10 +509,10 @@ const styles = {
     brandUnderline: {
         width: 50,
         height: 3,
-        backgroundColor: colors.primaryLight,
+        backgroundColor: colors.primary,
         borderRadius: 2,
         marginTop: 12,
-        shadowColor: colors.primaryLight,
+        shadowColor: colors.primary,
         shadowOffset: { width: 0, height: 0 },
         shadowOpacity: 0.5,
         shadowRadius: 4,

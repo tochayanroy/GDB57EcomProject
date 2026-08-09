@@ -1,9 +1,10 @@
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+    ActivityIndicator,
     Alert,
     Dimensions,
     FlatList,
@@ -36,7 +37,7 @@ const BANNER_WIDTH = SCREEN_WIDTH - 32;
 // API CONFIGURATION
 // ============================================================================
 
-const API_BASE_URL = 'http://192.168.0.103:5000';
+const API_BASE_URL = 'http://10.225.180.27:5000';
 
 // ============================================================================
 // TYPES & INTERFACES
@@ -59,26 +60,56 @@ interface Category {
     productCount?: number;
 }
 
+// Updated Product interface to match API response
 interface Product {
     _id: string;
-    title: string;
+    name: string;
     brand: string;
     price: number;
-    oldPrice: number;
-    discount: number;
+    discountPrice: number;
+    costPrice: number;
+    thumbnail: string;
+    images: string[];
+    description: string;
+    stock: number;
     rating: number;
     reviewCount: number;
-    image: string;
     isFavorite: boolean;
+    // Computed fields for display
+    title: string;
+    image: string;
+    oldPrice: number;
+    discount: number;
 }
 
-interface WishlistItem {
-    productId: string;
-    product: Product;
+// API Response Product type
+interface APIProduct {
+    _id: string;
+    name: string;
+    brand: string;
+    price: number;
+    discountPrice: number;
+    costPrice: number;
+    thumbnail: string;
+    images: string[];
+    description: string;
+    stock: number;
+    averageRating: number;
+    totalReviews: number;
+    isActive: boolean;
+    isFeatured: boolean;
+    category: {
+        _id: string;
+        name: string;
+        slug: string;
+    };
+    soldCount: number;
+    createdAt: string;
+    updatedAt: string;
 }
 
 // ============================================================================
-// API SERVICE FUNCTIONS - Following Login/Register pattern
+// API SERVICE FUNCTIONS
 // ============================================================================
 
 // Get User Profile
@@ -117,7 +148,7 @@ const getCategories = async (): Promise<Category[]> => {
         const headers: any = {
             'Content-Type': 'application/json',
         };
-        
+
         if (token) {
             headers['Authorization'] = `Bearer ${token}`;
         }
@@ -145,18 +176,51 @@ const getProducts = async (): Promise<Product[]> => {
         const headers: any = {
             'Content-Type': 'application/json',
         };
-        
+
         if (token) {
             headers['Authorization'] = `Bearer ${token}`;
         }
 
         const response = await axios.get(
-            `${API_BASE_URL}/Product/`,
+            `${API_BASE_URL}/Product`,
             { headers }
         );
 
         if (response.data.success) {
-            return response.data.data;
+            // Map API product data to display format
+            const products: Product[] = response.data.data.map((apiProduct: APIProduct) => {
+                // Calculate discount percentage
+                const discount = apiProduct.discountPrice && apiProduct.price
+                    ? Math.round(((apiProduct.price - apiProduct.discountPrice) / apiProduct.price) * 100)
+                    : 0;
+
+                // Use discountPrice as current price, price as old price
+                const currentPrice = apiProduct.discountPrice || apiProduct.price;
+                const oldPrice = apiProduct.price;
+
+                return {
+                    _id: apiProduct._id,
+                    name: apiProduct.name,
+                    brand: apiProduct.brand || 'Unknown Brand',
+                    price: currentPrice,
+                    discountPrice: apiProduct.discountPrice || 0,
+                    costPrice: apiProduct.costPrice || 0,
+                    thumbnail: apiProduct.thumbnail || 'https://via.placeholder.com/200',
+                    images: apiProduct.images || [],
+                    description: apiProduct.description || '',
+                    stock: apiProduct.stock || 0,
+                    rating: apiProduct.averageRating || 0,
+                    reviewCount: apiProduct.totalReviews || 0,
+                    isFavorite: false, // Will be set after fetching wishlist
+                    // Computed display fields
+                    title: apiProduct.name,
+                    image: apiProduct.thumbnail || 'https://via.placeholder.com/200',
+                    oldPrice: oldPrice,
+                    discount: discount
+                };
+            });
+
+            return products;
         } else {
             throw new Error(response.data.message || 'Failed to fetch products');
         }
@@ -166,8 +230,8 @@ const getProducts = async (): Promise<Product[]> => {
     }
 };
 
-// Get Wishlist
-const getWishlist = async (): Promise<WishlistItem[]> => {
+// Get Wishlist - Returns array of product IDs that are in wishlist
+const getWishlistProductIds = async (): Promise<string[]> => {
     try {
         const token = await AsyncStorage.getItem('token');
         if (!token) {
@@ -185,7 +249,32 @@ const getWishlist = async (): Promise<WishlistItem[]> => {
         );
 
         if (response.data.success) {
-            return response.data.data;
+            const data = response.data.data;
+
+            // Handle different response structures
+            if (Array.isArray(data)) {
+                // If data is an array of items with productId or product._id
+                return data.map((item: any) => {
+                    if (item.productId) return item.productId;
+                    if (item.product && item.product._id) return item.product._id;
+                    if (item._id && item.product) return item.product._id;
+                    return null;
+                }).filter(id => id !== null);
+            }
+            // If data is a wishlist object with items array
+            else if (data && data.items && Array.isArray(data.items)) {
+                return data.items.map((item: any) => {
+                    if (item.productId) return item.productId;
+                    if (item.product && item.product._id) return item.product._id;
+                    return null;
+                }).filter(id => id !== null);
+            }
+            // If data is a user object with userWishlist array
+            else if (data && data.userWishlist && Array.isArray(data.userWishlist)) {
+                return data.userWishlist.map((product: any) => product._id).filter(id => id !== null);
+            }
+
+            return [];
         } else {
             return [];
         }
@@ -281,7 +370,7 @@ const SectionHeader = ({ title, showSeeAll = true, onSeeAll }: { title: string; 
     <View style={styles.sectionHeader}>
         <Text style={styles.sectionHeaderTitle}>{title}</Text>
         {showSeeAll && (
-            <TouchableOpacity onPress={onSeeAll}>
+            <TouchableOpacity onPress={() => router.push(`/CategoriesScreen?type=${title.toLowerCase().replace(/\s+/g, '')}`)}>
                 <Text style={styles.sectionHeaderSeeAll}>See All</Text>
             </TouchableOpacity>
         )}
@@ -289,10 +378,14 @@ const SectionHeader = ({ title, showSeeAll = true, onSeeAll }: { title: string; 
 );
 
 const ProductCard = React.memo(({ product, onPress, onFavorite, variant = 'grid' }: { product: Product; onPress: () => void; onFavorite: () => void; variant?: 'grid' | 'horizontal' }) => {
+    const imageUrl = product.image ?
+        (product.image.startsWith('http') ? product.image : `${API_BASE_URL}${product.image}`)
+        : 'https://via.placeholder.com/200';
+
     if (variant === 'horizontal') {
         return (
             <TouchableOpacity onPress={onPress} activeOpacity={0.9} style={styles.horizontalProductCard}>
-                <Image source={{ uri: product.image }} style={styles.horizontalProductImage} />
+                <Image source={{ uri: imageUrl }} style={styles.horizontalProductImage} />
                 <View style={styles.horizontalProductContent}>
                     <View style={styles.horizontalProductInfo}>
                         <Text style={styles.horizontalProductTitle} numberOfLines={1}>{product.title}</Text>
@@ -304,11 +397,15 @@ const ProductCard = React.memo(({ product, onPress, onFavorite, variant = 'grid'
                     </View>
                     <View style={styles.horizontalProductFooter}>
                         <View style={styles.priceRow}>
-                            <Text style={styles.currentPrice}>${product.price}</Text>
-                            <Text style={styles.oldPrice}>${product.oldPrice}</Text>
+                            <Text style={styles.currentPrice}>₹{product.price}</Text>
+                            <Text style={styles.oldPrice}>₹{product.oldPrice}</Text>
                         </View>
                         <TouchableOpacity onPress={onFavorite} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                            <Ionicons name={product.isFavorite ? 'heart' : 'heart-outline'} size={20} color={product.isFavorite ? '#EF4444' : '#94A3B8'} />
+                            <Ionicons
+                                name={product.isFavorite ? 'heart' : 'heart-outline'}
+                                size={20}
+                                color={product.isFavorite ? '#EF4444' : '#94A3B8'}
+                            />
                         </TouchableOpacity>
                     </View>
                 </View>
@@ -319,14 +416,18 @@ const ProductCard = React.memo(({ product, onPress, onFavorite, variant = 'grid'
     return (
         <TouchableOpacity onPress={onPress} activeOpacity={0.9} style={styles.productCard}>
             <View style={styles.productImageContainer}>
-                <Image source={{ uri: product.image }} style={styles.productImage} />
+                <Image source={{ uri: imageUrl }} style={styles.productImage} />
                 {product.discount > 0 && (
                     <View style={styles.discountBadge}>
                         <Text style={styles.discountText}>-{product.discount}%</Text>
                     </View>
                 )}
                 <TouchableOpacity onPress={onFavorite} style={styles.favoriteButton}>
-                    <Ionicons name={product.isFavorite ? 'heart' : 'heart-outline'} size={16} color={product.isFavorite ? '#EF4444' : '#64748B'} />
+                    <Ionicons
+                        name={product.isFavorite ? 'heart' : 'heart-outline'}
+                        size={16}
+                        color={product.isFavorite ? '#EF4444' : '#64748B'}
+                    />
                 </TouchableOpacity>
             </View>
             <View style={styles.productInfo}>
@@ -336,8 +437,8 @@ const ProductCard = React.memo(({ product, onPress, onFavorite, variant = 'grid'
                     <RatingStars rating={product.rating} size={10} />
                 </View>
                 <View style={styles.priceRow}>
-                    <Text style={styles.currentPrice}>${product.price}</Text>
-                    <Text style={styles.oldPrice}>${product.oldPrice}</Text>
+                    <Text style={styles.currentPrice}>₹{product.price}</Text>
+                    <Text style={styles.oldPrice}>₹{product.oldPrice}</Text>
                 </View>
             </View>
         </TouchableOpacity>
@@ -379,7 +480,7 @@ export default function HomeScreen() {
     });
 
     // ============================================================================
-    // FETCH DATA FUNCTIONS - Following Register/Login pattern
+    // FETCH DATA FUNCTIONS
     // ============================================================================
 
     const getGreeting = (): string => {
@@ -410,65 +511,84 @@ export default function HomeScreen() {
         }
     };
 
+    // Function to apply wishlist status to products
+    const applyWishlistStatus = useCallback((products: Product[], wishlistIds: string[]): Product[] => {
+        return products.map(p => ({
+            ...p,
+            isFavorite: wishlistIds.includes(p._id)
+        }));
+    }, []);
+
     const loadProducts = async () => {
         try {
             const productsData = await getProducts();
-            setAllProducts(productsData);
 
-            // Split products into sections
-            const flash = productsData
-                .filter(p => p.discount >= 25)
+            // Load wishlist first to apply status
+            const wishlistIdsFromApi = await getWishlistProductIds();
+            setWishlistIds(wishlistIdsFromApi);
+
+            // Apply wishlist status to all products
+            const productsWithWishlist = applyWishlistStatus(productsData, wishlistIdsFromApi);
+            setAllProducts(productsWithWishlist);
+
+            // Split products into sections based on categories and features
+            // Flash Sale: Products with high discount or featured
+            const flash = productsWithWishlist
+                .filter(p => p.discount >= 15 || p.discountPrice > 0)
                 .slice(0, 10);
             setFlashProducts(flash);
 
-            const top = productsData
-                .filter(p => p.rating >= 4.5)
+            // Top Selling: Products with high rating or featured
+            const top = productsWithWishlist
+                .filter(p => p.rating >= 4.0)
+                .sort((a, b) => b.rating - a.rating)
                 .slice(0, 10);
             setTopProducts(top);
 
-            const recommended = productsData
-                .filter(p => p.discount < 25 && p.rating < 4.5)
+            // Recommended: Remaining products
+            const flashIds = new Set(flash.map(p => p._id));
+            const topIds = new Set(top.map(p => p._id));
+            const recommended = productsWithWishlist
+                .filter(p => !flashIds.has(p._id) && !topIds.has(p._id))
                 .slice(0, 10);
             setRecommendedProducts(recommended);
+
         } catch (error: any) {
             console.log('Load products error:', error.response?.data || error.message);
             Alert.alert('Error', 'Failed to load products. Please try again.');
         }
     };
 
-    const loadWishlist = async () => {
+    const loadWishlistOnly = async () => {
         try {
-            const wishlistData = await getWishlist();
-            const wishlistProductIds = wishlistData.map((item: WishlistItem) => item.productId);
-            setWishlistIds(wishlistProductIds);
+            const wishlistIdsFromApi = await getWishlistProductIds();
+            setWishlistIds(wishlistIdsFromApi);
 
-            // Update all product lists with favorite status
-            const updateWishlistStatus = (products: Product[]): Product[] => {
+            // Update all product lists with new wishlist status
+            const updateList = (products: Product[]): Product[] => {
                 return products.map(p => ({
                     ...p,
-                    isFavorite: wishlistProductIds.includes(p._id)
+                    isFavorite: wishlistIdsFromApi.includes(p._id)
                 }));
             };
 
-            setAllProducts(prev => updateWishlistStatus(prev));
-            setFlashProducts(prev => updateWishlistStatus(prev));
-            setTopProducts(prev => updateWishlistStatus(prev));
-            setRecommendedProducts(prev => updateWishlistStatus(prev));
+            setAllProducts(prev => updateList(prev));
+            setFlashProducts(prev => updateList(prev));
+            setTopProducts(prev => updateList(prev));
+            setRecommendedProducts(prev => updateList(prev));
+
+            console.log('Wishlist updated:', wishlistIdsFromApi.length);
         } catch (error: any) {
             console.log('Load wishlist error:', error.response?.data || error.message);
-            // Don't show alert for wishlist error
         }
     };
 
     const loadAllData = async () => {
         setIsLoading(true);
         try {
-            await Promise.all([
-                loadUserProfile(),
-                loadCategories(),
-                loadProducts(),
-                loadWishlist(),
-            ]);
+            await loadUserProfile();
+            await loadCategories();
+            await loadProducts();
         } catch (error: any) {
             console.log('Load all data error:', error.response?.data || error.message);
         } finally {
@@ -479,7 +599,9 @@ export default function HomeScreen() {
     const refreshData = async () => {
         setRefreshing(true);
         try {
-            await loadAllData();
+            await loadUserProfile();
+            await loadCategories();
+            await loadProducts();
         } catch (error: any) {
             console.log('Refresh data error:', error.response?.data || error.message);
         } finally {
@@ -492,13 +614,7 @@ export default function HomeScreen() {
     // ============================================================================
 
     const handleToggleFavorite = useCallback(async (productId: string) => {
-        // Find the product in any of the lists
-        const product = [...allProducts, ...flashProducts, ...topProducts, ...recommendedProducts]
-            .find(p => p._id === productId);
-        
-        if (!product) return;
-
-        const isCurrentlyFavorite = product.isFavorite;
+        const isCurrentlyFavorite = wishlistIds.includes(productId);
         let success = false;
 
         if (isCurrentlyFavorite) {
@@ -509,8 +625,8 @@ export default function HomeScreen() {
 
         if (success) {
             const newFavoriteStatus = !isCurrentlyFavorite;
-            
-            // Update wishlist IDs
+
+            // Update wishlist IDs state
             setWishlistIds(prev =>
                 newFavoriteStatus
                     ? [...prev, productId]
@@ -518,39 +634,35 @@ export default function HomeScreen() {
             );
 
             // Update all product lists
-            const updateProductList = (list: Product[]): Product[] =>
-                list.map(p => p._id === productId ? { ...p, isFavorite: newFavoriteStatus } : p);
+            const updateProductList = (list: Product[]): Product[] => {
+                return list.map(p =>
+                    p._id === productId
+                        ? { ...p, isFavorite: newFavoriteStatus }
+                        : p
+                );
+            };
 
             setAllProducts(prev => updateProductList(prev));
             setFlashProducts(prev => updateProductList(prev));
             setTopProducts(prev => updateProductList(prev));
             setRecommendedProducts(prev => updateProductList(prev));
         }
-    }, [allProducts, flashProducts, topProducts, recommendedProducts]);
+    }, [wishlistIds]);
 
     const handleProductPress = (productId: string) => {
-        router.push(`/ProductDetailScreen?id=${productId}`);
+        router.push(`/ProductDetailsScreen?id=${productId}`);
     };
 
     const handleCategoryPress = (categoryId: string) => {
-        router.push(`/CategoryScreen?id=${categoryId}`);
+        router.push(`/CategoriesDetailsScreen?id=${categoryId}`);
     };
 
     const handleSeeAllProducts = (type: string) => {
-        router.push(`/ProductListScreen?type=${type}`);
+        alert("Under Development")
     };
 
     const handleSearch = () => {
-        if (searchText.trim()) {
-            router.push(`/SearchScreen?q=${encodeURIComponent(searchText)}`);
-        } else {
-            Alert.alert('Search', 'Please enter a search term');
-        }
-    };
-
-    const handleNotificationPress = () => {
-        setNotificationCount(0);
-        router.push('/NotificationsScreen');
+        alert("Under Development")
     };
 
     // ============================================================================
@@ -561,19 +673,33 @@ export default function HomeScreen() {
         loadAllData();
     }, []);
 
+    // Refresh wishlist status when screen comes into focus
+    useFocusEffect(
+        useCallback(() => {
+            loadWishlistOnly();
+        }, [])
+    );
+
     // ============================================================================
     // RENDER FUNCTIONS
     // ============================================================================
 
     const renderCategoryItem = ({ item, index }: { item: Category; index: number }) => (
         <Animated.View entering={FadeInUp.delay(index * 50).springify().damping(15)}>
-            <TouchableOpacity 
-                activeOpacity={0.7} 
+            <TouchableOpacity
+                activeOpacity={0.7}
                 style={styles.categoryItem}
                 onPress={() => handleCategoryPress(item._id)}
             >
                 <View style={styles.categoryIconContainer}>
-                    <MaterialCommunityIcons name={item.icon as any} size={28} color="#2563EB" />
+                    <Image
+                        source={{
+                            uri: item.image
+                                ? (item.image.startsWith('http') ? item.image : `${API_BASE_URL}${item.image}`)
+                                : 'https://via.placeholder.com/200'
+                        }}
+                        style={styles.categoryImage}
+                    />
                 </View>
                 <Text style={styles.categoryName}>{item.name}</Text>
             </TouchableOpacity>
@@ -610,28 +736,12 @@ export default function HomeScreen() {
                 {/* Header */}
                 <View style={styles.header}>
                     <View style={styles.userInfo}>
-                        <Image 
-                            source={{ 
-                                uri: user?.avatar || 'https://randomuser.me/api/portraits/men/32.jpg' 
-                            }} 
-                            style={styles.userAvatar} 
-                        />
+                        <Image source={{uri: 'https://avatars.githubusercontent.com/u/83724456?v=4'}}style={styles.userAvatar}/>
                         <View style={styles.userTextContainer}>
                             <Text style={styles.userGreeting}>{getGreeting()} 👋</Text>
                             <Text style={styles.userName}>{user?.name || 'Guest'}</Text>
                         </View>
                     </View>
-                    <TouchableOpacity 
-                        onPress={handleNotificationPress} 
-                        style={styles.notificationButton}
-                    >
-                        <Ionicons name="notifications-outline" size={26} color="#0F172A" />
-                        {notificationCount > 0 && (
-                            <View style={styles.notificationBadge}>
-                                <Text style={styles.notificationBadgeText}>{notificationCount}</Text>
-                            </View>
-                        )}
-                    </TouchableOpacity>
                 </View>
 
                 {/* Search Bar */}
@@ -725,11 +835,11 @@ export default function HomeScreen() {
                                     horizontal
                                     showsHorizontalScrollIndicator={false}
                                     renderItem={({ item }) => (
-                                        <ProductCard 
-                                            product={item} 
-                                            onPress={() => handleProductPress(item._id)} 
-                                            onFavorite={() => handleToggleFavorite(item._id)} 
-                                            variant="grid" 
+                                        <ProductCard
+                                            product={item}
+                                            onPress={() => handleProductPress(item._id)}
+                                            onFavorite={() => handleToggleFavorite(item._id)}
+                                            variant="grid"
                                         />
                                     )}
                                     keyExtractor={(item) => item._id}
@@ -747,11 +857,11 @@ export default function HomeScreen() {
                                     horizontal
                                     showsHorizontalScrollIndicator={false}
                                     renderItem={({ item }) => (
-                                        <ProductCard 
-                                            product={item} 
-                                            onPress={() => handleProductPress(item._id)} 
-                                            onFavorite={() => handleToggleFavorite(item._id)} 
-                                            variant="grid" 
+                                        <ProductCard
+                                            product={item}
+                                            onPress={() => handleProductPress(item._id)}
+                                            onFavorite={() => handleToggleFavorite(item._id)}
+                                            variant="grid"
                                         />
                                     )}
                                     keyExtractor={(item) => item._id}
@@ -761,30 +871,6 @@ export default function HomeScreen() {
                             </>
                         )}
 
-                        {/* Recommended Products - Vertical Grid */}
-                        <SectionHeader title="Recommended For You" />
-                        <View style={styles.recommendedGrid}>
-                            {recommendedProducts.length > 0 ? (
-                                recommendedProducts.map((product, index) => (
-                                    <Animated.View 
-                                        key={product._id} 
-                                        entering={FadeInUp.delay(index * 50).springify()} 
-                                        style={styles.recommendedGridItem}
-                                    >
-                                        <ProductCard 
-                                            product={product} 
-                                            onPress={() => handleProductPress(product._id)} 
-                                            onFavorite={() => handleToggleFavorite(product._id)} 
-                                            variant="grid" 
-                                        />
-                                    </Animated.View>
-                                ))
-                            ) : (
-                                <View style={styles.emptyContainer}>
-                                    <Text style={styles.emptyText}>No products available</Text>
-                                </View>
-                            )}
-                        </View>
 
                         {/* Feature Highlights */}
                         <View style={styles.featuresContainer}>
@@ -1055,7 +1141,7 @@ const styles = StyleSheet.create({
         width: 60,
         height: 60,
         borderRadius: 30,
-        backgroundColor: '#FFFFFF',
+        backgroundColor: 'red',
         justifyContent: 'center',
         alignItems: 'center',
         shadowColor: '#000',
@@ -1063,6 +1149,13 @@ const styles = StyleSheet.create({
         shadowOpacity: 0.05,
         shadowRadius: 4,
         elevation: 2,
+    },
+    categoryImage: {
+        width: 55,
+        height: 55,
+        borderRadius: 30,
+        justifyContent: 'center',
+        alignItems: 'center',
     },
     categoryName: {
         fontSize: 12,
@@ -1254,6 +1347,3 @@ const styles = StyleSheet.create({
         height: 80,
     },
 });
-
-// Import ActivityIndicator for loading state
-import { ActivityIndicator } from 'react-native';

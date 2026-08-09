@@ -1,7 +1,3 @@
-// WelcomeScreen.tsx
-// Production-Ready E-Commerce Welcome Screen for React Native Expo
-// Features: Premium UI, Reanimated 2 Animations, TypeScript, Accessibility, Fully Responsive
-
 import { router } from 'expo-router';
 import React, { memo, useCallback, useEffect } from 'react';
 import {

@@ -23,12 +23,12 @@ export default function UserTabLayout() {
       />
 
       <Tabs.Screen
-        name="CategoriesScreen"
+        name="WishlistScreen"
         options={{
-          title: "Categories",
+          title: "Wishlist",
           tabBarIcon: ({ size, color }) => (
             <Ionicons
-              name="grid-outline"
+              name="heart-outline"
               size={size}
               color={color}
             />

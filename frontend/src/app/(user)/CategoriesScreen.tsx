@@ -3,6 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+
 import {
     ActivityIndicator,
     Alert,
@@ -10,7 +11,6 @@ import {
     FlatList,
     Image,
     RefreshControl,
-    SafeAreaView,
     ScrollView,
     StatusBar,
     Text,
@@ -25,16 +25,16 @@ import Animated, {
     useSharedValue,
     withSpring
 } from 'react-native-reanimated';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useSafeAreaInsets, SafeAreaView } from 'react-native-safe-area-context';
 
 // ============================================================================
 // API CONFIGURATION
 // ============================================================================
 
-const API_BASE_URL = 'http://192.168.0.103:5000';
+const API_BASE_URL = 'http://10.225.180.27:5000';
 
 // ============================================================================
-// TYPES & INTERFACES
+// TYPES & INTERFACES - Updated to match API response
 // ============================================================================
 
 interface Category {
@@ -48,6 +48,8 @@ interface Category {
     productCount: number;
     isPopular?: boolean;
     isFeatured?: boolean;
+    createdAt?: string;
+    updatedAt?: string;
 }
 
 interface Brand {
@@ -57,9 +59,36 @@ interface Brand {
     productCount?: number;
 }
 
+// API Product response interface
+interface APIProduct {
+    _id: string;
+    name: string;
+    brand: string;
+    price: number;
+    discountPrice: number;
+    costPrice: number;
+    thumbnail: string;
+    images: string[];
+    description: string;
+    stock: number;
+    averageRating: number;
+    totalReviews: number;
+    isActive: boolean;
+    isFeatured: boolean;
+    category: {
+        _id: string;
+        name: string;
+        slug: string;
+    };
+    soldCount: number;
+    createdAt: string;
+    updatedAt: string;
+}
+
 interface Product {
     _id: string;
     title: string;
+    name: string;
     brand: string;
     price: number;
     oldPrice: number;
@@ -67,11 +96,13 @@ interface Product {
     rating: number;
     reviewCount: number;
     image: string;
+    thumbnail: string;
     category: string;
+    categoryId: string;
 }
 
 // ============================================================================
-// API SERVICE FUNCTIONS - Following Login/Register pattern
+// API SERVICE FUNCTIONS
 // ============================================================================
 
 // Get All Categories
@@ -106,7 +137,22 @@ const getCategories = async (params?: {
         );
 
         if (response.data.success && response.data.data) {
-            return response.data.data;
+            // Map API response to our Category interface
+            const categories: Category[] = response.data.data.map((item: any) => ({
+                _id: item._id || item.id,
+                name: item.name || 'Unnamed Category',
+                slug: item.slug || item.name?.toLowerCase().replace(/\s+/g, '-') || 'category',
+                description: item.description || '',
+                image: item.image || 'https://via.placeholder.com/200',
+                icon: item.icon || 'tag',
+                isActive: item.isActive !== undefined ? item.isActive : true,
+                productCount: item.productCount || 0,
+                isPopular: item.isPopular || false,
+                isFeatured: item.isFeatured || false,
+                createdAt: item.createdAt,
+                updatedAt: item.updatedAt
+            }));
+            return categories;
         } else {
             return [];
         }
@@ -134,7 +180,21 @@ const getCategoryById = async (id: string): Promise<Category | null> => {
         );
 
         if (response.data.success && response.data.data) {
-            return response.data.data;
+            const item = response.data.data;
+            return {
+                _id: item._id || item.id,
+                name: item.name || 'Unnamed Category',
+                slug: item.slug || item.name?.toLowerCase().replace(/\s+/g, '-') || 'category',
+                description: item.description || '',
+                image: item.image || 'https://via.placeholder.com/200',
+                icon: item.icon || 'tag',
+                isActive: item.isActive !== undefined ? item.isActive : true,
+                productCount: item.productCount || 0,
+                isPopular: item.isPopular || false,
+                isFeatured: item.isFeatured || false,
+                createdAt: item.createdAt,
+                updatedAt: item.updatedAt
+            };
         } else {
             return null;
         }
@@ -175,7 +235,32 @@ const getCategoryProducts = async (id: string, params?: {
         );
 
         if (response.data.success && response.data.data) {
-            return response.data.data;
+            // Map API products to Product interface
+            const products: Product[] = response.data.data.map((apiProduct: APIProduct) => {
+                const discount = apiProduct.discountPrice && apiProduct.price
+                    ? Math.round(((apiProduct.price - apiProduct.discountPrice) / apiProduct.price) * 100)
+                    : 0;
+
+                const currentPrice = apiProduct.discountPrice || apiProduct.price;
+                const oldPrice = apiProduct.price;
+
+                return {
+                    _id: apiProduct._id,
+                    title: apiProduct.name,
+                    name: apiProduct.name,
+                    brand: apiProduct.brand || 'Unknown Brand',
+                    price: currentPrice,
+                    oldPrice: oldPrice,
+                    discount: discount,
+                    rating: apiProduct.averageRating || 0,
+                    reviewCount: apiProduct.totalReviews || 0,
+                    image: apiProduct.thumbnail || 'https://via.placeholder.com/200',
+                    thumbnail: apiProduct.thumbnail || 'https://via.placeholder.com/200',
+                    category: apiProduct.category?.name || 'Uncategorized',
+                    categoryId: apiProduct.category?._id || id
+                };
+            });
+            return products;
         } else {
             return [];
         }
@@ -197,32 +282,32 @@ const getBrands = async (): Promise<Brand[]> => {
             headers['Authorization'] = `Bearer ${token}`;
         }
 
-        // Try to get brands from products endpoint
+        // Get products to extract brands
         const response = await axios.get(
             `${API_BASE_URL}/Product/`,
             { headers }
         );
 
         if (response.data.success && response.data.data) {
-            // Extract unique brands from products
             const products = response.data.data;
-            const brandMap = new Map();
-            
+            const brandMap = new Map<string, Brand>();
+
             products.forEach((product: any) => {
-                if (product.brand && !brandMap.has(product.brand)) {
-                    brandMap.set(product.brand, {
-                        _id: product.brand.toLowerCase().replace(/\s+/g, '-'),
-                        name: product.brand,
-                        logo: product.image || 'https://via.placeholder.com/60',
+                const brandName = product.brand || 'Unknown';
+                if (!brandMap.has(brandName)) {
+                    brandMap.set(brandName, {
+                        _id: brandName.toLowerCase().replace(/\s+/g, '-'),
+                        name: brandName,
+                        logo: product.thumbnail || 'https://via.placeholder.com/60',
                         productCount: 1
                     });
-                } else if (product.brand && brandMap.has(product.brand)) {
-                    const existing = brandMap.get(product.brand);
+                } else {
+                    const existing = brandMap.get(brandName)!;
                     existing.productCount = (existing.productCount || 0) + 1;
                 }
             });
 
-            return Array.from(brandMap.values());
+            return Array.from(brandMap.values()).slice(0, 20);
         } else {
             return [];
         }
@@ -265,8 +350,19 @@ const getCategoryIcon = (name: string): string => {
         'kids': 'child-care',
         'pets': 'pets',
         'office supplies': 'briefcase',
+        'ear rings': 'earrings',
+        'rings': 'ring',
+        'necklace': 'necklace',
+        'bracelet': 'bracelet'
     };
-    return iconMap[name.toLowerCase()] || 'tag';
+    const lowerName = name.toLowerCase();
+    // Check for partial matches
+    for (const [key, value] of Object.entries(iconMap)) {
+        if (lowerName.includes(key) || key.includes(lowerName)) {
+            return value;
+        }
+    }
+    return 'tag';
 };
 
 const getIconComponent = (iconName: string, size: number = 22, color: string = '#2563EB') => {
@@ -287,6 +383,10 @@ const getIconComponent = (iconName: string, size: number = 22, color: string = '
         'child-care': <MaterialIcons name="child-care" size={size} color={color} />,
         'pets': <MaterialIcons name="pets" size={size} color={color} />,
         'briefcase': <Feather name="briefcase" size={size - 2} color={color} />,
+        'earrings': <Ionicons name="ear" size={size} color={color} />,
+        'ring': <FontAwesome5 name="ring" size={size - 2} color={color} />,
+        'necklace': <FontAwesome5 name="gem" size={size - 2} color={color} />,
+        'bracelet': <FontAwesome5 name="circle" size={size - 2} color={color} />,
     };
     return iconMap[iconName] || <Feather name="tag" size={size - 2} color={color} />;
 };
@@ -305,6 +405,7 @@ interface CategoryCardProps {
 
 const CategoryCard = React.memo(({ category, onPress, index }: CategoryCardProps) => {
     const scale = useSharedValue(1);
+    const [imageError, setImageError] = useState(false);
 
     const animatedStyle = useAnimatedStyle(() => ({
         transform: [{ scale: scale.value }],
@@ -318,7 +419,7 @@ const CategoryCard = React.memo(({ category, onPress, index }: CategoryCardProps
         scale.value = withSpring(1, { damping: 15, stiffness: 300 });
     };
 
-    const imageUrl = category.image || 'https://via.placeholder.com/200';
+    const imageUrl = imageError ? 'https://via.placeholder.com/200' : (category.image || 'https://via.placeholder.com/200');
 
     return (
         <AnimatedTouchable
@@ -329,7 +430,11 @@ const CategoryCard = React.memo(({ category, onPress, index }: CategoryCardProps
             onPress={() => onPress(category)}
             activeOpacity={0.9}
         >
-            <Image source={{ uri: imageUrl }} style={styles.categoryImage} />
+            <Image
+                source={{ uri: imageUrl ? `${API_BASE_URL}${imageUrl}` : 'https://via.placeholder.com/200' }}
+                style={styles.categoryImage}
+                onError={() => setImageError(true)}
+            />
             <View style={styles.categoryOverlay}>
                 <View style={styles.categoryIconContainer}>
                     {getIconComponent(getCategoryIcon(category.name), 22, '#2563EB')}
@@ -350,12 +455,17 @@ interface HorizontalCategoryCardProps {
 }
 
 const HorizontalCategoryCard = React.memo(({ category, onPress }: HorizontalCategoryCardProps) => {
-    const imageUrl = category.image || 'https://via.placeholder.com/110';
+    const [imageError, setImageError] = useState(false);
+    const imageUrl = imageError ? 'https://via.placeholder.com/110' : (category.image || 'https://via.placeholder.com/110');
 
     return (
         <TouchableOpacity style={styles.horizontalCategoryCard} onPress={() => onPress(category)} activeOpacity={0.8}>
-            <Image source={{ uri: imageUrl }} style={styles.horizontalCategoryImage} />
-            <Text style={styles.horizontalCategoryName}>{category.name}</Text>
+            <Image
+                source={{ uri: imageUrl ? `${API_BASE_URL}${imageUrl}` : 'https://via.placeholder.com/110' }}
+                style={styles.horizontalCategoryImage}
+                onError={() => setImageError(true)}
+            />
+            <Text style={styles.horizontalCategoryName} numberOfLines={1}>{category.name}</Text>
             <Text style={styles.horizontalCategoryCount}>{category.productCount?.toLocaleString() || 0}+</Text>
         </TouchableOpacity>
     );
@@ -367,12 +477,18 @@ interface BrandCardProps {
 }
 
 const BrandCard = React.memo(({ brand, onPress }: BrandCardProps) => {
-    const logoUrl = brand.logo || 'https://via.placeholder.com/60';
+    const [imageError, setImageError] = useState(false);
+    const logoUrl = imageError ? 'https://via.placeholder.com/60' : (brand.logo || 'https://via.placeholder.com/60');
 
     return (
         <TouchableOpacity style={styles.brandCard} onPress={() => onPress(brand)} activeOpacity={0.7}>
-            <Image source={{ uri: logoUrl }} style={styles.brandLogo} />
-            <Text style={styles.brandName}>{brand.name}</Text>
+            <Image
+                source={{ uri: logoUrl ? `${API_BASE_URL}${logoUrl}` : 'https://via.placeholder.com/60' }}
+                style={styles.brandLogo}
+                onError={() => setImageError(true)}
+            />
+
+            <Text style={styles.brandName} numberOfLines={1}>{brand.name}</Text>
             {brand.productCount && <Text style={styles.brandProductCount}>{brand.productCount}+ Products</Text>}
         </TouchableOpacity>
     );
@@ -408,13 +524,15 @@ const CategoriesScreen: React.FC = () => {
             setCategories(categoriesData || []);
             setFilteredCategories(categoriesData || []);
 
-            // Set popular categories (those with productCount > 500 or isPopular)
+            // Set popular categories - either those with productCount > 0 or first 6
             const popular = (categoriesData || [])
-                .filter(c => (c.productCount || 0) > 500 || c.isPopular)
+                .filter(c => (c.productCount || 0) > 0)
                 .slice(0, 6);
+
+            // If no popular categories found, take first 6
             setPopularCategories(popular.length > 0 ? popular : (categoriesData || []).slice(0, 6));
 
-            // Set featured category
+            // Set featured category - first category with isFeatured or first category
             const featured = (categoriesData || []).find(c => c.isFeatured) || (categoriesData || [])[0];
             setFeaturedCategory(featured || null);
         } catch (error: any) {
@@ -503,8 +621,13 @@ const CategoriesScreen: React.FC = () => {
         });
     };
 
-    const handleBackPress = () => {
-        router.back();
+    const handleBack = () => {
+        router.push('/');
+    };
+
+
+    const handleCartPress = () => {
+        router.push('/CartScreen');
     };
 
     const handleSearchPress = () => {
@@ -560,8 +683,14 @@ const CategoriesScreen: React.FC = () => {
 
     if (loading) {
         return (
-            <SafeAreaView style={styles.safeArea}>
+            <SafeAreaView style={styles.safeArea} edges={['top']}>
                 <StatusBar barStyle="dark-content" backgroundColor="#F8FAFC" />
+                <View style={styles.header}>
+                    <Text style={styles.headerTitle}>Categories</Text>
+                    <TouchableOpacity style={styles.headerButton} onPress={handleCartPress}>
+                        <Feather name="shopping-bag" size={22} color="#0F172A" />
+                    </TouchableOpacity>
+                </View>
                 <View style={styles.loadingContainer}>
                     <ActivityIndicator size="large" color="#2563EB" />
                     <Text style={styles.loadingText}>Loading categories...</Text>
@@ -578,8 +707,19 @@ const CategoriesScreen: React.FC = () => {
     // ============================================================================
 
     return (
-        <SafeAreaView style={styles.safeArea}>
+        <SafeAreaView style={styles.safeArea} edges={['top']}>
             <StatusBar barStyle="dark-content" backgroundColor="#F8FAFC" />
+
+            {/* Header - Same style as WishlistScreen and ProfileScreen */}
+            <View style={styles.header}>
+                <TouchableOpacity style={styles.floatingBtn} onPress={handleBack}>
+                    <Ionicons name="chevron-back" size={24} color="#0F172A" />
+                </TouchableOpacity>
+                <Text style={styles.headerTitle}>Categories</Text>
+                <TouchableOpacity style={styles.headerButton} onPress={handleCartPress}>
+                    <Feather name="shopping-bag" size={22} color="#0F172A" />
+                </TouchableOpacity>
+            </View>
 
             <ScrollView
                 ref={scrollViewRef}
@@ -597,17 +737,6 @@ const CategoriesScreen: React.FC = () => {
                     />
                 }
             >
-                {/* Header */}
-                <Animated.View entering={FadeInDown.duration(400).springify()} style={[styles.header, { paddingTop: insets.top > 0 ? 0 : 8 }]}>
-                    <TouchableOpacity style={styles.headerButton} onPress={handleBackPress} activeOpacity={0.7}>
-                        <Ionicons name="chevron-back" size={24} color="#0F172A" />
-                    </TouchableOpacity>
-                    <Text style={styles.headerTitle}>Categories</Text>
-                    <TouchableOpacity style={styles.headerButton} onPress={handleSearchPress} activeOpacity={0.7}>
-                        <Feather name="search" size={22} color="#0F172A" />
-                    </TouchableOpacity>
-                </Animated.View>
-
                 {/* Search Section */}
                 <Animated.View entering={FadeInDown.delay(100).duration(400).springify()} style={styles.searchSection}>
                     <View style={styles.searchContainer}>
@@ -644,13 +773,14 @@ const CategoriesScreen: React.FC = () => {
                                     activeOpacity={0.95}
                                 >
                                     <Image
-                                        source={{ uri: featuredCategory.image || 'https://via.placeholder.com/400' }}
+                                        source={{ uri: featuredCategory.image ? `${API_BASE_URL}${featuredCategory.image}` : 'https://via.placeholder.com/400' }}
                                         style={styles.featuredImage}
                                     />
+
                                     <View style={styles.featuredOverlay}>
                                         <View style={styles.featuredBadgeContainer}>
                                             <Text style={styles.featuredBadge}>
-                                                {featuredCategory.productCount > 1000 ? '🔥 Popular' : '✨ Featured'}
+                                                {featuredCategory.productCount && featuredCategory.productCount > 100 ? '🔥 Popular' : '✨ Featured'}
                                             </Text>
                                         </View>
                                         <Text style={styles.featuredTitle}>{featuredCategory.name} Collection</Text>
@@ -659,7 +789,7 @@ const CategoriesScreen: React.FC = () => {
                                         </Text>
                                         <View style={styles.featuredButton}>
                                             <Text style={styles.featuredButtonText}>Explore Now</Text>
-                                            <Feather name="arrow-right" size={16} color="white" />
+                                            <Feather name="arrow-right" size={16} color="white" style={{ marginLeft: 8 }} />
                                         </View>
                                     </View>
                                 </TouchableOpacity>
@@ -837,7 +967,7 @@ const styles: any = {
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'space-between',
-        paddingHorizontal: 20,
+        paddingHorizontal: 16,
         paddingVertical: 12,
         backgroundColor: '#F8FAFC',
     },
@@ -858,7 +988,6 @@ const styles: any = {
         fontSize: 20,
         fontWeight: '700',
         color: '#0F172A',
-        letterSpacing: -0.3,
     },
     searchSection: {
         flexDirection: 'row',
@@ -960,7 +1089,6 @@ const styles: any = {
     featuredButton: {
         flexDirection: 'row',
         alignItems: 'center',
-        gap: 8,
         backgroundColor: '#2563EB',
         paddingHorizontal: 16,
         paddingVertical: 10,
@@ -1112,6 +1240,7 @@ const styles: any = {
         fontSize: 13,
         fontWeight: '600',
         color: '#0F172A',
+        textAlign: 'center',
     },
     brandProductCount: {
         fontSize: 10,

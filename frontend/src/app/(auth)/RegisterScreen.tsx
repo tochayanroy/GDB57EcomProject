@@ -32,7 +32,7 @@ import Animated, {
 // ============================================================================
 
 // API Configuration - Update this with your actual API URL
-const API_BASE_URL = 'http://192.168.0.103:5000';
+const API_BASE_URL = 'https://ecomapp.tochayanroy.in';
 
 const ANIMATION_CONFIG = {
     logoFadeIn: {
@@ -623,18 +623,16 @@ const RegisterScreen: React.FC<RegisterScreenProps> = ({
                 `${API_BASE_URL}/User/register`,
                 formData
             );
+                console.log(response.data);
 
             if (response.data.success) {
                 await AsyncStorage.setItem(
                     "token",
-                    response.data.data
+                    response.data.token
                 );
 
-                console.log("Token saved successfully");
-                console.log(response.data.message);
-
                 // Navigate to home screen
-                router.replace('./(user)');
+                router.replace('/(user)');
 
                 // Show success message
                 Alert.alert(
@@ -989,7 +987,7 @@ const styles = StyleSheet.create({
     // Header Section
     headerSection: {
         alignItems: 'center',
-        paddingTop: Platform.OS === 'ios' ? 20 : 16,
+        paddingTop: 50,
         paddingBottom: 8,
     },
     logoContainer: {

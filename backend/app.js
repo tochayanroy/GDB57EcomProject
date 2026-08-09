@@ -3,6 +3,7 @@ const app = express();
 const dotenv = require('dotenv');
 const db = require('./config/database');
 require('./middleware/Passport-jwt');
+const path = require("path");
 
 
 
@@ -29,6 +30,12 @@ app.use("/Order", OrderRoutes);
 app.use("/Payment", PaymentRoutes);
 app.use("/Notification", NotificationRoutes);
 
+
+
+app.use(
+  "/uploads",
+  express.static(path.join(__dirname, "uploads"))
+);
 
 app.listen(process.env.PORT, () => {
     console.log("Server is running on port 5000");

@@ -1,788 +1,1170 @@
 const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
-const passport = require("passport");
-const Notification = require("../modules/NotificationSchema");
+const Review = require("../modules/ReviewSchema");
+const Product = require("../modules/ProductSchema");
 const User = require("../modules/UserSchema");
+const Order = require("../modules/OrderSchema");
+const passport = require("passport");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
 
 // ==============================
-// MIDDLEWARE
+// 📁 FILE UPLOAD CONFIGURATION
 // ==============================
 
-const authorizeAdmin = () => {
-	return (req, res, next) => {
-		if (req.user && req.user.role === "admin") {
-			next();
-		} else {
-			res.status(403).json({ success: false, message: "Admin access required" });
-		}
-	};
+// Ensure upload directory exists
+const uploadDir = path.join(__dirname, "../uploads/reviews");
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+// Configure multer for review images
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        cb(null, uploadDir);
+    },
+    filename: function (req, file, cb) {
+        const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+        cb(null, "review-" + uniqueSuffix + path.extname(file.originalname));
+    }
+});
+
+const fileFilter = (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif|webp/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+
+    if (mimetype && extname) {
+        return cb(null, true);
+    } else {
+        cb(new Error("Only image files are allowed"));
+    }
 };
 
-// ==============================
-// HELPER FUNCTIONS
-// ==============================
-
-// Create notification helper
-const createNotification = async (notificationData) => {
-	try {
-		const notification = new Notification(notificationData);
-		await notification.save();
-		
-		// Add to user's notifications array
-		await User.findByIdAndUpdate(notificationData.user, {
-			$push: { notifications: notification._id }
-		});
-		
-		return notification;
-	} catch (error) {
-		console.error("Error creating notification:", error);
-		return null;
-	}
-};
-
-// ==============================
-// 📋 USER ROUTES (Authenticated users only)
-// ==============================
-
-// Get user's notifications
-router.get("/", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-		const {
-			page = 1,
-			limit = 20,
-			sort = "-createdAt",
-			type,
-			category,
-			isRead,
-			priority
-		} = req.query;
-
-		const query = { user: userId };
-		
-		// Apply filters
-		if (type) query.type = type;
-		if (category) query.category = category;
-		if (isRead !== undefined) query.isRead = isRead === "true";
-		if (priority) query.priority = priority;
-		
-		// Only show non-expired notifications
-		query.$or = [
-			{ expiresAt: null },
-			{ expiresAt: { $gt: new Date() } }
-		];
-
-		const notifications = await Notification.find(query)
-			.populate("sender", "name email avatar")
-			.sort(sort)
-			.limit(limit * 1)
-			.skip((page - 1) * limit)
-			.lean();
-
-		const total = await Notification.countDocuments(query);
-		
-		// Get unread count
-		const unreadCount = await Notification.countDocuments({
-			user: userId,
-			isRead: false,
-			$or: [
-				{ expiresAt: null },
-				{ expiresAt: { $gt: new Date() } }
-			]
-		});
-
-		res.json({
-			success: true,
-			data: {
-				notifications,
-				unreadCount,
-				pagination: {
-					page: parseInt(page),
-					limit: parseInt(limit),
-					total,
-					pages: Math.ceil(total / limit)
-				}
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Get notification by ID
-router.get("/:notificationId", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { notificationId } = req.params;
-		const userId = req.user._id;
-
-		const notification = await Notification.findOne({
-			_id: notificationId,
-			user: userId
-		})
-		.populate("sender", "name email avatar")
-		.lean();
-
-		if (!notification) {
-			return res.status(404).json({ success: false, message: "Notification not found" });
-		}
-
-		res.json({ success: true, data: notification });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Mark notification as read
-router.patch("/:notificationId/read", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { notificationId } = req.params;
-		const userId = req.user._id;
-
-		const notification = await Notification.findOneAndUpdate(
-			{ _id: notificationId, user: userId, isRead: false },
-			{ 
-				isRead: true,
-				readAt: new Date()
-			},
-			{ new: true }
-		);
-
-		if (!notification) {
-			return res.status(404).json({ success: false, message: "Notification not found or already read" });
-		}
-
-		res.json({
-			success: true,
-			message: "Notification marked as read",
-			data: notification
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Mark all notifications as read
-router.patch("/mark-all-read", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-
-		const result = await Notification.updateMany(
-			{ user: userId, isRead: false },
-			{ 
-				isRead: true,
-				readAt: new Date()
-			}
-		);
-
-		res.json({
-			success: true,
-			message: `${result.modifiedCount} notifications marked as read`,
-			data: { modifiedCount: result.modifiedCount }
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Delete single notification
-router.delete("/:notificationId", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { notificationId } = req.params;
-		const userId = req.user._id;
-
-		const notification = await Notification.findOneAndDelete({
-			_id: notificationId,
-			user: userId
-		});
-
-		if (!notification) {
-			return res.status(404).json({ success: false, message: "Notification not found" });
-		}
-
-		// Remove from user's notifications array
-		await User.findByIdAndUpdate(userId, {
-			$pull: { notifications: notificationId }
-		});
-
-		res.json({
-			success: true,
-			message: "Notification deleted successfully"
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Delete all read notifications
-router.delete("/delete-all-read", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-
-		const notifications = await Notification.find({
-			user: userId,
-			isRead: true
-		});
-
-		const notificationIds = notifications.map(n => n._id);
-
-		const result = await Notification.deleteMany({
-			user: userId,
-			isRead: true
-		});
-
-		// Remove from user's notifications array
-		await User.findByIdAndUpdate(userId, {
-			$pull: { notifications: { $in: notificationIds } }
-		});
-
-		res.json({
-			success: true,
-			message: `${result.deletedCount} read notifications deleted`,
-			data: { deletedCount: result.deletedCount }
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-});
-
-// Get notification preferences/summary
-router.get("/preferences/summary", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const userId = req.user._id;
-
-		const stats = await Notification.aggregate([
-			{ $match: { user: userId } },
-			{
-				$group: {
-					_id: null,
-					total: { $sum: 1 },
-					unread: { $sum: { $cond: [{ $eq: ["$isRead", false] }, 1, 0] } },
-					read: { $sum: { $cond: [{ $eq: ["$isRead", true] }, 1, 0] } }
-				}
-			}
-		]);
-
-		const typeBreakdown = await Notification.aggregate([
-			{ $match: { user: userId, isRead: false } },
-			{
-				$group: {
-					_id: "$type",
-					count: { $sum: 1 }
-				}
-			}
-		]);
-
-		res.json({
-			success: true,
-			data: {
-				stats: stats[0] || { total: 0, unread: 0, read: 0 },
-				unreadByType: typeBreakdown
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+const upload = multer({
+    storage: storage,
+    limits: { fileSize: 2 * 1024 * 1024 }, // 2MB limit
+    fileFilter: fileFilter
 });
 
 // ==============================
-// 🔐 ADMIN ROUTES
+// ⭐ REVIEW ROUTES (Protected - User)
 // ==============================
 
-// Send notification to specific user (Admin only)
-router.post("/admin/send-to-user", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const {
-			userId,
-			type,
-			title,
-			message,
-			category,
-			actionUrl,
-			image,
-			priority,
-			expiresInDays
-		} = req.body;
+// 📥 GET PRODUCT REVIEWS (Public)
+router.get("/product/:productId", async (req, res) => {
+    try {
+        const {
+            page = 1,
+            limit = 10,
+            rating,
+            sort = "-createdAt"
+        } = req.query;
 
-		if (!userId || !type || !title || !message) {
-			return res.status(400).json({
-				success: false,
-				message: "User ID, type, title, and message are required"
-			});
-		}
+        const productId = req.params.productId;
 
-		// Check if user exists
-		const user = await User.findById(userId);
-		if (!user) {
-			return res.status(404).json({ success: false, message: "User not found" });
-		}
+        // Check if product exists
+        const product = await Product.findById(productId);
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: "Product not found"
+            });
+        }
 
-		// Calculate expiry date
-		let expiresAt = null;
-		if (expiresInDays) {
-			expiresAt = new Date();
-			expiresAt.setDate(expiresAt.getDate() + expiresInDays);
-		}
+        const filter = { 
+            product: productId,
+            status: "approved"
+        };
+        if (rating) filter.rating = parseInt(rating);
 
-		const notification = await createNotification({
-			user: userId,
-			sender: req.user._id,
-			type,
-			title,
-			message,
-			category: category || "general",
-			actionUrl: actionUrl || null,
-			image: image || null,
-			priority: priority || "medium",
-			expiresAt
-		});
+        const pageNum = parseInt(page);
+        const limitNum = parseInt(limit);
+        const skip = (pageNum - 1) * limitNum;
 
-		if (!notification) {
-			return res.status(500).json({ success: false, message: "Failed to create notification" });
-		}
+        const reviews = await Review.find(filter)
+            .populate("user", "name avatar")
+            .populate({
+                path: "replies.user",
+                select: "name avatar role"
+            })
+            .sort(sort)
+            .skip(skip)
+            .limit(limitNum);
 
-		res.status(201).json({
-			success: true,
-			message: "Notification sent successfully",
-			data: notification
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        const total = await Review.countDocuments(filter);
+
+        // Get rating distribution
+        const ratingDistribution = await Review.aggregate([
+            {
+                $match: { 
+                    product: new mongoose.Types.ObjectId(productId),
+                    status: "approved"
+                }
+            },
+            {
+                $group: {
+                    _id: "$rating",
+                    count: { $sum: 1 }
+                }
+            },
+            {
+                $sort: { _id: -1 }
+            }
+        ]);
+
+        res.json({
+            success: true,
+            data: reviews,
+            ratingDistribution,
+            pagination: {
+                page: pageNum,
+                limit: limitNum,
+                total,
+                pages: Math.ceil(total / limitNum)
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Send notification to all users (Admin only)
-router.post("/admin/send-to-all", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const {
-			type,
-			title,
-			message,
-			category,
-			actionUrl,
-			image,
-			priority,
-			expiresInDays,
-			userFilters
-		} = req.body;
+// 📊 GET PRODUCT REVIEW SUMMARY (Public)
+router.get("/product/:productId/summary", async (req, res) => {
+    try {
+        const productId = req.params.productId;
 
-		if (!type || !title || !message) {
-			return res.status(400).json({
-				success: false,
-				message: "Type, title, and message are required"
-			});
-		}
+        const product = await Product.findById(productId)
+            .select("averageRating totalReviews");
 
-		// Build user query
-		let userQuery = {};
-		if (userFilters) {
-			if (userFilters.role) userQuery.role = userFilters.role;
-			if (userFilters.isActive !== undefined) userQuery.isActive = userFilters.isActive;
-		}
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: "Product not found"
+            });
+        }
 
-		const users = await User.find(userQuery).select("_id");
+        // Get rating distribution
+        const distribution = await Review.aggregate([
+            {
+                $match: { 
+                    product: new mongoose.Types.ObjectId(productId),
+                    status: "approved"
+                }
+            },
+            {
+                $group: {
+                    _id: "$rating",
+                    count: { $sum: 1 }
+                }
+            },
+            {
+                $sort: { _id: -1 }
+            }
+        ]);
 
-		if (users.length === 0) {
-			return res.status(404).json({ success: false, message: "No users found" });
-		}
+        // Create full distribution (1-5 stars)
+        const fullDistribution = {};
+        for (let i = 5; i >= 1; i--) {
+            const found = distribution.find(d => d._id === i);
+            fullDistribution[i] = found ? found.count : 0;
+        }
 
-		// Calculate expiry date
-		let expiresAt = null;
-		if (expiresInDays) {
-			expiresAt = new Date();
-			expiresAt.setDate(expiresAt.getDate() + expiresInDays);
-		}
+        // Calculate percentages
+        const totalReviews = product.totalReviews || 0;
+        const percentageDistribution = {};
+        for (let i = 5; i >= 1; i--) {
+            percentageDistribution[i] = totalReviews > 0 
+                ? ((fullDistribution[i] / totalReviews) * 100).toFixed(1)
+                : 0;
+        }
 
-		// Create notifications for all users
-		const notifications = [];
-		for (const user of users) {
-			const notification = await createNotification({
-				user: user._id,
-				sender: req.user._id,
-				type,
-				title,
-				message,
-				category: category || "general",
-				actionUrl: actionUrl || null,
-				image: image || null,
-				priority: priority || "medium",
-				expiresAt
-			});
-			if (notification) notifications.push(notification);
-		}
+        res.json({
+            success: true,
+            data: {
+                averageRating: product.averageRating || 0,
+                totalReviews,
+                distribution: fullDistribution,
+                percentageDistribution
+            }
+        });
 
-		res.status(201).json({
-			success: true,
-			message: `Notification sent to ${notifications.length} users`,
-			data: {
-				sentCount: notifications.length,
-				failedCount: users.length - notifications.length
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Send notification to users by role (Admin only)
-router.post("/admin/send-to-role", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const {
-			role,
-			type,
-			title,
-			message,
-			category,
-			actionUrl,
-			image,
-			priority,
-			expiresInDays
-		} = req.body;
+// ➕ CREATE REVIEW
+router.post("/product/:productId", 
+    passport.authenticate("jwt", { session: false }), 
+    upload.array("images", 5),
+    async (req, res) => {
+        try {
+            const { rating, title, comment } = req.body;
+            const productId = req.params.productId;
 
-		if (!role || !type || !title || !message) {
-			return res.status(400).json({
-				success: false,
-				message: "Role, type, title, and message are required"
-			});
-		}
+            // Validation
+            if (!rating || !comment) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Rating and comment are required"
+                });
+            }
 
-		const users = await User.find({ role }).select("_id");
+            if (rating < 1 || rating > 5) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Rating must be between 1 and 5"
+                });
+            }
 
-		if (users.length === 0) {
-			return res.status(404).json({ success: false, message: `No users found with role: ${role}` });
-		}
+            // Check if product exists
+            const product = await Product.findById(productId);
+            if (!product) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Product not found"
+                });
+            }
 
-		// Calculate expiry date
-		let expiresAt = null;
-		if (expiresInDays) {
-			expiresAt = new Date();
-			expiresAt.setDate(expiresAt.getDate() + expiresInDays);
-		}
+            // Check if user already reviewed this product
+            const existingReview = await Review.findOne({
+                product: productId,
+                user: req.user._id
+            });
 
-		const notifications = [];
-		for (const user of users) {
-			const notification = await createNotification({
-				user: user._id,
-				sender: req.user._id,
-				type,
-				title,
-				message,
-				category: category || "general",
-				actionUrl: actionUrl || null,
-				image: image || null,
-				priority: priority || "medium",
-				expiresAt
-			});
-			if (notification) notifications.push(notification);
-		}
+            if (existingReview) {
+                return res.status(400).json({
+                    success: false,
+                    message: "You have already reviewed this product"
+                });
+            }
 
-		res.status(201).json({
-			success: true,
-			message: `Notification sent to ${notifications.length} users with role: ${role}`,
-			data: {
-				sentCount: notifications.length,
-				failedCount: users.length - notifications.length,
-				role
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+            // Check if user purchased the product
+            const hasPurchased = await Order.findOne({
+                user: req.user._id,
+                "items.product": productId,
+                status: "delivered"
+            });
+
+            // Process images
+            const images = req.files.map(file => 
+                `/uploads/reviews/${file.filename}`
+            );
+
+            // Create review
+            const review = await Review.create({
+                product: productId,
+                user: req.user._id,
+                rating: parseInt(rating),
+                title: title || "",
+                comment,
+                images,
+                status: hasPurchased ? "approved" : "pending",
+                isVerifiedPurchase: !!hasPurchased
+            });
+
+            // Add review to product
+            product.reviews.push(review._id);
+            product.totalReviews = product.reviews.length;
+
+            // Calculate average rating
+            const allReviews = await Review.find({ 
+                product: productId, 
+                status: "approved" 
+            });
+            
+            if (allReviews.length > 0) {
+                const totalRating = allReviews.reduce((sum, r) => sum + r.rating, 0);
+                product.averageRating = totalRating / allReviews.length;
+            }
+
+            await product.save();
+
+            // Add review to user
+            await User.findByIdAndUpdate(req.user._id, {
+                $push: { reviews: review._id }
+            });
+
+            // Populate user details
+            await review.populate("user", "name avatar");
+
+            res.status(201).json({
+                success: true,
+                message: "Review submitted successfully",
+                data: review
+            });
+
+        } catch (error) {
+            res.status(500).json({
+                success: false,
+                message: error.message
+            });
+        }
+    }
+);
+
+// ✏️ UPDATE REVIEW
+router.put("/:reviewId", 
+    passport.authenticate("jwt", { session: false }), 
+    upload.array("images", 5),
+    async (req, res) => {
+        try {
+            const { rating, title, comment, removeImages } = req.body;
+            const reviewId = req.params.reviewId;
+
+            const review = await Review.findById(reviewId);
+
+            if (!review) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Review not found"
+                });
+            }
+
+            // Check if user owns the review or is admin
+            if (review.user.toString() !== req.user._id.toString() && req.user.role !== "admin") {
+                return res.status(403).json({
+                    success: false,
+                    message: "You can only update your own reviews"
+                });
+            }
+
+            // Check if review is in pending status and not admin
+            if (review.status === "pending" && req.user.role !== "admin") {
+                return res.status(400).json({
+                    success: false,
+                    message: "Review is pending moderation and cannot be updated"
+                });
+            }
+
+            // Update fields
+            if (rating) review.rating = parseInt(rating);
+            if (title !== undefined) review.title = title;
+            if (comment !== undefined) review.comment = comment;
+
+            // Handle image uploads
+            if (req.files && req.files.length > 0) {
+                const newImages = req.files.map(file => 
+                    `/uploads/reviews/${file.filename}`
+                );
+                review.images.push(...newImages);
+            }
+
+            // Remove images
+            if (removeImages) {
+                const removeImageList = typeof removeImages === "string" 
+                    ? JSON.parse(removeImages) 
+                    : removeImages;
+                
+                // Delete files from server
+                for (const imageUrl of removeImageList) {
+                    const imagePath = path.join(__dirname, "..", imageUrl);
+                    if (fs.existsSync(imagePath)) {
+                        fs.unlinkSync(imagePath);
+                    }
+                }
+                
+                review.images = review.images.filter(img => !removeImageList.includes(img));
+            }
+
+            review.isEdited = true;
+            review.editedAt = new Date();
+
+            await review.save();
+
+            // Recalculate product average rating
+            const product = await Product.findById(review.product);
+            const allReviews = await Review.find({ 
+                product: review.product, 
+                status: "approved" 
+            });
+            
+            if (allReviews.length > 0) {
+                const totalRating = allReviews.reduce((sum, r) => sum + r.rating, 0);
+                product.averageRating = totalRating / allReviews.length;
+            } else {
+                product.averageRating = 0;
+            }
+            await product.save();
+
+            res.json({
+                success: true,
+                message: "Review updated successfully",
+                data: review
+            });
+
+        } catch (error) {
+            res.status(500).json({
+                success: false,
+                message: error.message
+            });
+        }
+    }
+);
+
+// ❌ DELETE REVIEW
+router.delete("/:reviewId", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const reviewId = req.params.reviewId;
+
+        const review = await Review.findById(reviewId);
+
+        if (!review) {
+            return res.status(404).json({
+                success: false,
+                message: "Review not found"
+            });
+        }
+
+        // Check if user owns the review or is admin
+        if (review.user.toString() !== req.user._id.toString() && req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "You can only delete your own reviews"
+            });
+        }
+
+        // Delete review images from server
+        for (const imageUrl of review.images) {
+            const imagePath = path.join(__dirname, "..", imageUrl);
+            if (fs.existsSync(imagePath)) {
+                fs.unlinkSync(imagePath);
+            }
+        }
+
+        // Remove review from product
+        await Product.findByIdAndUpdate(review.product, {
+            $pull: { reviews: review._id }
+        });
+
+        // Remove review from user
+        await User.findByIdAndUpdate(review.user, {
+            $pull: { reviews: review._id }
+        });
+
+        // Recalculate product average rating
+        const product = await Product.findById(review.product);
+        const allReviews = await Review.find({ 
+            product: review.product, 
+            status: "approved" 
+        });
+        
+        if (allReviews.length > 0) {
+            const totalRating = allReviews.reduce((sum, r) => sum + r.rating, 0);
+            product.averageRating = totalRating / allReviews.length;
+        } else {
+            product.averageRating = 0;
+        }
+        product.totalReviews = allReviews.length;
+        await product.save();
+
+        // Delete the review
+        await review.deleteOne();
+
+        res.json({
+            success: true,
+            message: "Review deleted successfully"
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Get all notifications (Admin only)
-router.get("/admin/all", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const {
-			page = 1,
-			limit = 20,
-			sort = "-createdAt",
-			type,
-			category,
-			isRead,
-			priority,
-			userId,
-			fromDate,
-			toDate
-		} = req.query;
+// 👍 HELPFUL VOTE ON REVIEW
+router.post("/:reviewId/helpful", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const reviewId = req.params.reviewId;
 
-		const query = {};
+        const review = await Review.findById(reviewId);
+        if (!review) {
+            return res.status(404).json({
+                success: false,
+                message: "Review not found"
+            });
+        }
 
-		if (type) query.type = type;
-		if (category) query.category = category;
-		if (isRead !== undefined) query.isRead = isRead === "true";
-		if (priority) query.priority = priority;
-		if (userId) query.user = userId;
-		if (fromDate || toDate) {
-			query.createdAt = {};
-			if (fromDate) query.createdAt.$gte = new Date(fromDate);
-			if (toDate) query.createdAt.$lte = new Date(toDate);
-		}
+        // Check if user already voted (you can track this with a separate collection)
+        // For now, simple increment
+        review.helpfulCount += 1;
+        await review.save();
 
-		const notifications = await Notification.find(query)
-			.populate("user", "name email role")
-			.populate("sender", "name email role")
-			.sort(sort)
-			.limit(limit * 1)
-			.skip((page - 1) * limit)
-			.lean();
+        res.json({
+            success: true,
+            message: "Voted as helpful",
+            data: { helpfulCount: review.helpfulCount }
+        });
 
-		const total = await Notification.countDocuments(query);
-
-		// Get summary statistics
-		const summary = await Notification.aggregate([
-			{ $match: query },
-			{
-				$group: {
-					_id: null,
-					total: { $sum: 1 },
-					read: { $sum: { $cond: [{ $eq: ["$isRead", true] }, 1, 0] } },
-					unread: { $sum: { $cond: [{ $eq: ["$isRead", false] }, 1, 0] } },
-					highPriority: { $sum: { $cond: [{ $eq: ["$priority", "high"] }, 1, 0] } }
-				}
-			}
-		]);
-
-		res.json({
-			success: true,
-			data: {
-				notifications,
-				summary: summary[0] || { total: 0, read: 0, unread: 0, highPriority: 0 },
-				pagination: {
-					page: parseInt(page),
-					limit: parseInt(limit),
-					total,
-					pages: Math.ceil(total / limit)
-				}
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Get notification statistics (Admin only)
-router.get("/admin/stats", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { period = "week" } = req.query;
+// 👎 NOT HELPFUL VOTE ON REVIEW
+router.post("/:reviewId/not-helpful", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const reviewId = req.params.reviewId;
 
-		let dateFilter = {};
-		const now = new Date();
-		
-		if (period === "week") {
-			dateFilter = { createdAt: { $gte: new Date(now.setDate(now.getDate() - 7)) } };
-		} else if (period === "month") {
-			dateFilter = { createdAt: { $gte: new Date(now.setMonth(now.getMonth() - 1)) } };
-		} else if (period === "year") {
-			dateFilter = { createdAt: { $gte: new Date(now.setFullYear(now.getFullYear() - 1)) } };
-		}
+        const review = await Review.findById(reviewId);
+        if (!review) {
+            return res.status(404).json({
+                success: false,
+                message: "Review not found"
+            });
+        }
 
-		// Notifications over time
-		const timeline = await Notification.aggregate([
-			{ $match: dateFilter },
-			{
-				$group: {
-					_id: {
-						date: { $dateToString: { format: period === "week" ? "%Y-%m-%d" : period === "month" ? "%Y-%m" : "%Y", date: "$createdAt" } },
-						type: "$type"
-					},
-					count: { $sum: 1 }
-				}
-			},
-			{ $sort: { "_id.date": 1 } }
-		]);
+        review.notHelpfulCount += 1;
+        await review.save();
 
-		// Type breakdown
-		const typeBreakdown = await Notification.aggregate([
-			{ $match: dateFilter },
-			{
-				$group: {
-					_id: "$type",
-					count: { $sum: 1 },
-					readCount: { $sum: { $cond: [{ $eq: ["$isRead", true] }, 1, 0] } }
-				}
-			}
-		]);
+        res.json({
+            success: true,
+            message: "Voted as not helpful",
+            data: { notHelpfulCount: review.notHelpfulCount }
+        });
 
-		// Priority breakdown
-		const priorityBreakdown = await Notification.aggregate([
-			{ $match: dateFilter },
-			{
-				$group: {
-					_id: "$priority",
-					count: { $sum: 1 }
-				}
-			}
-		]);
-
-		// Top users by notification count
-		const topUsers = await Notification.aggregate([
-			{ $match: dateFilter },
-			{
-				$group: {
-					_id: "$user",
-					count: { $sum: 1 },
-					unreadCount: { $sum: { $cond: [{ $eq: ["$isRead", false] }, 1, 0] } }
-				}
-			},
-			{ $sort: { count: -1 } },
-			{ $limit: 10 },
-			{
-				$lookup: {
-					from: "users",
-					localField: "_id",
-					foreignField: "_id",
-					as: "user"
-				}
-			},
-			{ $unwind: "$user" }
-		]);
-
-		res.json({
-			success: true,
-			data: {
-				timeline,
-				typeBreakdown,
-				priorityBreakdown,
-				topUsers,
-				period
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Delete expired notifications (Admin only)
-router.delete("/admin/cleanup-expired", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const result = await Notification.deleteMany({
-			expiresAt: { $lt: new Date() }
-		});
+// 💬 REPLY TO REVIEW
+router.post("/:reviewId/reply", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const { message } = req.body;
+        const reviewId = req.params.reviewId;
 
-		res.json({
-			success: true,
-			message: `${result.deletedCount} expired notifications deleted`,
-			data: { deletedCount: result.deletedCount }
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        if (!message) {
+            return res.status(400).json({
+                success: false,
+                message: "Reply message is required"
+            });
+        }
+
+        const review = await Review.findById(reviewId);
+        if (!review) {
+            return res.status(404).json({
+                success: false,
+                message: "Review not found"
+            });
+        }
+
+        // Check if user owns the product or is admin
+        const product = await Product.findById(review.product);
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: "Product not found"
+            });
+        }
+
+        // Only product owner or admin can reply
+        if (req.user.role !== "admin") {
+            // Check if user is product owner (you might want to add a vendor field)
+            // For now, allow any user to reply
+        }
+
+        // Add reply
+        review.replies.push({
+            user: req.user._id,
+            message,
+            createdAt: new Date()
+        });
+
+        await review.save();
+
+        // Populate reply user
+        await review.populate("replies.user", "name avatar role");
+
+        res.json({
+            success: true,
+            message: "Reply added successfully",
+            data: review.replies
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Delete notification by ID (Admin only)
-router.delete("/admin/:notificationId", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { notificationId } = req.params;
+// 📥 GET USER REVIEWS
+router.get("/my-reviews", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const { page = 1, limit = 10, sort = "-createdAt" } = req.query;
 
-		const notification = await Notification.findByIdAndDelete(notificationId);
+        const pageNum = parseInt(page);
+        const limitNum = parseInt(limit);
+        const skip = (pageNum - 1) * limitNum;
 
-		if (!notification) {
-			return res.status(404).json({ success: false, message: "Notification not found" });
-		}
+        const reviews = await Review.find({ user: req.user._id })
+            .populate("product", "name slug images thumbnail")
+            .sort(sort)
+            .skip(skip)
+            .limit(limitNum);
 
-		// Remove from user's notifications array
-		await User.findByIdAndUpdate(notification.user, {
-			$pull: { notifications: notificationId }
-		});
+        const total = await Review.countDocuments({ user: req.user._id });
 
-		res.json({
-			success: true,
-			message: "Notification deleted successfully"
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        res.json({
+            success: true,
+            data: reviews,
+            pagination: {
+                page: pageNum,
+                limit: limitNum,
+                total,
+                pages: Math.ceil(total / limitNum)
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Bulk delete notifications (Admin only)
-router.delete("/admin/bulk/delete", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { notificationIds } = req.body;
+// 📊 GET REVIEW STATISTICS
+router.get("/stats", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const totalReviews = await Review.countDocuments({ user: req.user._id });
+        
+        const ratingDistribution = await Review.aggregate([
+            {
+                $match: { user: req.user._id }
+            },
+            {
+                $group: {
+                    _id: "$rating",
+                    count: { $sum: 1 }
+                }
+            },
+            {
+                $sort: { _id: -1 }
+            }
+        ]);
 
-		if (!notificationIds || !Array.isArray(notificationIds) || notificationIds.length === 0) {
-			return res.status(400).json({
-				success: false,
-				message: "Notification IDs array required"
-			});
-		}
+        const averageRating = await Review.aggregate([
+            {
+                $match: { user: req.user._id }
+            },
+            {
+                $group: {
+                    _id: null,
+                    avg: { $avg: "$rating" },
+                    total: { $sum: 1 }
+                }
+            }
+        ]);
 
-		const notifications = await Notification.find({ _id: { $in: notificationIds } });
-		
-		const result = await Notification.deleteMany({ _id: { $in: notificationIds } });
+        const statusCount = await Review.aggregate([
+            {
+                $match: { user: req.user._id }
+            },
+            {
+                $group: {
+                    _id: "$status",
+                    count: { $sum: 1 }
+                }
+            }
+        ]);
 
-		// Remove from users' notifications arrays
-		for (const notification of notifications) {
-			await User.findByIdAndUpdate(notification.user, {
-				$pull: { notifications: notification._id }
-			});
-		}
+        res.json({
+            success: true,
+            data: {
+                totalReviews,
+                averageRating: averageRating.length > 0 ? averageRating[0].avg : 0,
+                ratingDistribution,
+                statusCount
+            }
+        });
 
-		res.json({
-			success: true,
-			message: `${result.deletedCount} notifications deleted`,
-			data: { deletedCount: result.deletedCount }
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Create system notification (Admin only)
-router.post("/admin/system", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const {
-			title,
-			message,
-			category,
-			actionUrl,
-			priority,
-			expiresInDays
-		} = req.body;
+// ==============================
+// 👑 ADMIN REVIEW ROUTES
+// ==============================
 
-		if (!title || !message) {
-			return res.status(400).json({
-				success: false,
-				message: "Title and message are required"
-			});
-		}
+// 📥 GET ALL REVIEWS (Admin Only)
+router.get("/admin/all", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		// Calculate expiry date
-		let expiresAt = null;
-		if (expiresInDays) {
-			expiresAt = new Date();
-			expiresAt.setDate(expiresAt.getDate() + expiresInDays);
-		}
+        const {
+            page = 1,
+            limit = 20,
+            status,
+            rating,
+            productId,
+            userId,
+            search,
+            sort = "-createdAt"
+        } = req.query;
 
-		// Get all active users
-		const users = await User.find({ isActive: true }).select("_id");
+        const filter = {};
+        if (status) filter.status = status;
+        if (rating) filter.rating = parseInt(rating);
+        if (productId) filter.product = productId;
+        if (userId) filter.user = userId;
+        
+        if (search) {
+            filter.$or = [
+                { comment: { $regex: search, $options: "i" } },
+                { title: { $regex: search, $options: "i" } }
+            ];
+        }
 
-		const notifications = [];
-		for (const user of users) {
-			const notification = await createNotification({
-				user: user._id,
-				sender: req.user._id,
-				type: "system",
-				title,
-				message,
-				category: category || "system",
-				actionUrl: actionUrl || null,
-				priority: priority || "medium",
-				expiresAt
-			});
-			if (notification) notifications.push(notification);
-		}
+        const pageNum = parseInt(page);
+        const limitNum = parseInt(limit);
+        const skip = (pageNum - 1) * limitNum;
 
-		res.status(201).json({
-			success: true,
-			message: `System notification sent to ${notifications.length} users`,
-			data: {
-				sentCount: notifications.length
-			}
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        const reviews = await Review.find(filter)
+            .populate("user", "name email")
+            .populate("product", "name slug images")
+            .populate("replies.user", "name avatar role")
+            .sort(sort)
+            .skip(skip)
+            .limit(limitNum);
+
+        const total = await Review.countDocuments(filter);
+
+        res.json({
+            success: true,
+            data: reviews,
+            pagination: {
+                page: pageNum,
+                limit: limitNum,
+                total,
+                pages: Math.ceil(total / limitNum)
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// ✅ APPROVE REVIEW (Admin Only)
+router.put("/admin/:reviewId/approve", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const review = await Review.findById(req.params.reviewId);
+        if (!review) {
+            return res.status(404).json({
+                success: false,
+                message: "Review not found"
+            });
+        }
+
+        if (review.status === "approved") {
+            return res.status(400).json({
+                success: false,
+                message: "Review is already approved"
+            });
+        }
+
+        review.status = "approved";
+        await review.save();
+
+        // Update product average rating
+        const product = await Product.findById(review.product);
+        const allReviews = await Review.find({ 
+            product: review.product, 
+            status: "approved" 
+        });
+        
+        if (allReviews.length > 0) {
+            const totalRating = allReviews.reduce((sum, r) => sum + r.rating, 0);
+            product.averageRating = totalRating / allReviews.length;
+        }
+        product.totalReviews = allReviews.length;
+        await product.save();
+
+        res.json({
+            success: true,
+            message: "Review approved successfully",
+            data: review
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// ❌ REJECT REVIEW (Admin Only)
+router.put("/admin/:reviewId/reject", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const { reason } = req.body;
+        const review = await Review.findById(req.params.reviewId);
+        if (!review) {
+            return res.status(404).json({
+                success: false,
+                message: "Review not found"
+            });
+        }
+
+        if (review.status === "rejected") {
+            return res.status(400).json({
+                success: false,
+                message: "Review is already rejected"
+            });
+        }
+
+        review.status = "rejected";
+        review.comment = review.comment + `\n\n[Rejected Reason: ${reason || "No reason provided"}]`;
+        await review.save();
+
+        res.json({
+            success: true,
+            message: "Review rejected successfully",
+            data: review
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 🔄 BULK APPROVE REVIEWS (Admin Only)
+router.put("/admin/bulk/approve", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const { reviewIds } = req.body;
+
+        if (!reviewIds || !Array.isArray(reviewIds) || reviewIds.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Review IDs array is required"
+            });
+        }
+
+        const result = await Review.updateMany(
+            { _id: { $in: reviewIds } },
+            { status: "approved" }
+        );
+
+        // Update all affected products' average ratings
+        const reviews = await Review.find({ _id: { $in: reviewIds } });
+        const productIds = [...new Set(reviews.map(r => r.product.toString()))];
+
+        for (const productId of productIds) {
+            const allReviews = await Review.find({ 
+                product: productId, 
+                status: "approved" 
+            });
+            
+            const product = await Product.findById(productId);
+            if (product) {
+                if (allReviews.length > 0) {
+                    const totalRating = allReviews.reduce((sum, r) => sum + r.rating, 0);
+                    product.averageRating = totalRating / allReviews.length;
+                } else {
+                    product.averageRating = 0;
+                }
+                product.totalReviews = allReviews.length;
+                await product.save();
+            }
+        }
+
+        res.json({
+            success: true,
+            message: `${result.modifiedCount} reviews approved`,
+            data: result
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 📊 GET REVIEW STATISTICS (Admin Only)
+router.get("/admin/stats", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const totalReviews = await Review.countDocuments();
+        const pendingReviews = await Review.countDocuments({ status: "pending" });
+        const approvedReviews = await Review.countDocuments({ status: "approved" });
+        const rejectedReviews = await Review.countDocuments({ status: "rejected" });
+
+        // Rating distribution
+        const ratingDistribution = await Review.aggregate([
+            {
+                $match: { status: "approved" }
+            },
+            {
+                $group: {
+                    _id: "$rating",
+                    count: { $sum: 1 }
+                }
+            },
+            {
+                $sort: { _id: -1 }
+            }
+        ]);
+
+        // Average rating
+        const averageRating = await Review.aggregate([
+            {
+                $match: { status: "approved" }
+            },
+            {
+                $group: {
+                    _id: null,
+                    avg: { $avg: "$rating" }
+                }
+            }
+        ]);
+
+        // Reviews by product
+        const productStats = await Review.aggregate([
+            {
+                $match: { status: "approved" }
+            },
+            {
+                $group: {
+                    _id: "$product",
+                    count: { $sum: 1 },
+                    avgRating: { $avg: "$rating" }
+                }
+            },
+            {
+                $lookup: {
+                    from: "products",
+                    localField: "_id",
+                    foreignField: "_id",
+                    as: "product"
+                }
+            },
+            {
+                $project: {
+                    productName: { $arrayElemAt: ["$product.name", 0] },
+                    productSlug: { $arrayElemAt: ["$product.slug", 0] },
+                    count: 1,
+                    avgRating: 1
+                }
+            },
+            {
+                $sort: { count: -1 }
+            },
+            {
+                $limit: 10
+            }
+        ]);
+
+        // Reviews by user
+        const userStats = await Review.aggregate([
+            {
+                $group: {
+                    _id: "$user",
+                    count: { $sum: 1 },
+                    avgRating: { $avg: "$rating" }
+                }
+            },
+            {
+                $lookup: {
+                    from: "users",
+                    localField: "_id",
+                    foreignField: "_id",
+                    as: "user"
+                }
+            },
+            {
+                $project: {
+                    userName: { $arrayElemAt: ["$user.name", 0] },
+                    userEmail: { $arrayElemAt: ["$user.email", 0] },
+                    count: 1,
+                    avgRating: 1
+                }
+            },
+            {
+                $sort: { count: -1 }
+            },
+            {
+                $limit: 10
+            }
+        ]);
+
+        // Monthly review trends
+        const sixMonthsAgo = new Date();
+        sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+
+        const monthlyTrends = await Review.aggregate([
+            {
+                $match: {
+                    createdAt: { $gte: sixMonthsAgo },
+                    status: "approved"
+                }
+            },
+            {
+                $group: {
+                    _id: {
+                        year: { $year: "$createdAt" },
+                        month: { $month: "$createdAt" }
+                    },
+                    count: { $sum: 1 },
+                    avgRating: { $avg: "$rating" }
+                }
+            },
+            {
+                $sort: { "_id.year": 1, "_id.month": 1 }
+            }
+        ]);
+
+        // Helpful ratio
+        const helpfulStats = await Review.aggregate([
+            {
+                $match: { status: "approved" }
+            },
+            {
+                $group: {
+                    _id: null,
+                    totalHelpful: { $sum: "$helpfulCount" },
+                    totalNotHelpful: { $sum: "$notHelpfulCount" },
+                    avgHelpful: { $avg: "$helpfulCount" }
+                }
+            }
+        ]);
+
+        res.json({
+            success: true,
+            data: {
+                totalReviews,
+                pendingReviews,
+                approvedReviews,
+                rejectedReviews,
+                averageRating: averageRating.length > 0 ? averageRating[0].avg : 0,
+                ratingDistribution,
+                productStats,
+                userStats,
+                monthlyTrends,
+                helpfulStats: helpfulStats.length > 0 ? helpfulStats[0] : {
+                    totalHelpful: 0,
+                    totalNotHelpful: 0,
+                    avgHelpful: 0
+                }
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 📥 EXPORT REVIEWS (Admin Only)
+router.get("/admin/export/csv", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const { dateFrom, dateTo, status, productId } = req.query;
+        const filter = {};
+
+        if (status) filter.status = status;
+        if (productId) filter.product = productId;
+        if (dateFrom || dateTo) {
+            filter.createdAt = {};
+            if (dateFrom) filter.createdAt.$gte = new Date(dateFrom);
+            if (dateTo) filter.createdAt.$lte = new Date(dateTo);
+        }
+
+        const reviews = await Review.find(filter)
+            .populate("user", "name email")
+            .populate("product", "name slug")
+            .sort("-createdAt");
+
+        // Create CSV header
+        let csv = "User,Email,Product,Rating,Title,Comment,Status,Helpful,Not Helpful,Created At\n";
+
+        // Add data rows
+        reviews.forEach(review => {
+            csv += `"${review.user?.name || 'Deleted User'}","${review.user?.email || 'N/A'}","${review.product?.name || 'Deleted Product'}",${review.rating},"${(review.title || '').replace(/"/g, '""')}","${review.comment.replace(/"/g, '""')}","${review.status}",${review.helpfulCount},${review.notHelpfulCount},"${review.createdAt.toISOString()}"\n`;
+        });
+
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader("Content-Disposition", `attachment; filename=reviews-${new Date().toISOString().split("T")[0]}.csv`);
+        res.send(csv);
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
 module.exports = router;

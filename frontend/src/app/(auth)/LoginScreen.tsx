@@ -1,7 +1,3 @@
-// LoginScreen.tsx
-// Production-Ready E-Commerce Login Screen for React Native Expo
-// Features: Premium UI, Form Validation, Reanimated 2, TypeScript, Accessibility, Performance Optimized
-
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { router } from 'expo-router';
@@ -35,7 +31,7 @@ import Animated, {
 // CONSTANTS & CONFIGURATION
 // ============================================================================
 
-const API_BASE_URL = 'https://gdbecom.tochayanroy.in'; // Replace with your actual API URL
+const API_BASE_URL = 'http://10.225.180.27:5000';
 
 const ANIMATION_CONFIG = {
     logoFadeIn: {
@@ -503,11 +499,10 @@ const LoginScreen: React.FC<LoginScreenProps> = ({
 
             alert(response.data.message)
 
-
             if (response.data.success) {
                 await AsyncStorage.setItem(
                     "token",
-                    response.data.data
+                    response.data.token
                 );
 
                 if (response.data.user.role === 'admin') {
@@ -788,7 +783,7 @@ const styles = StyleSheet.create({
     // Header Section
     headerSection: {
         alignItems: 'center',
-        paddingTop: Platform.OS === 'ios' ? 20 : 16,
+        paddingTop: 50,
         paddingBottom: 8,
     },
     logoContainer: {

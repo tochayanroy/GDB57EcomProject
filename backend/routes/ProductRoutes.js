@@ -1,583 +1,1018 @@
 const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
-const User = require("../modules/UserSchema");
 const Product = require("../modules/ProductSchema");
 const Category = require("../modules/CategorySchema");
 const Review = require("../modules/ReviewSchema");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 const passport = require("passport");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
 
+// ==============================
+// 📁 FILE UPLOAD CONFIGURATION
+// ==============================
 
-// Middleware Imports (assuming these exist in your project)
+// Ensure upload directory exists
+const uploadDir = path.join(__dirname, "../uploads/products");
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
 
-const authorizeAdmin = (req, res, next) => {
-    try {
-        if (!req.user) {
-            return res.status(401).json({ 
-                success: false, 
-                message: "Authentication required" 
-            });
-        }
-        
-        if (req.user.role !== "admin") {
-            return res.status(403).json({ 
-                success: false, 
-                message: "Admin access required" 
-            });
-        }
-        
-        next();
-    } catch (error) {
-        res.status(500).json({ 
-            success: false, 
-            message: "Server error during authorization" 
-        });
+// Configure multer for product images
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        cb(null, uploadDir);
+    },
+    filename: function (req, file, cb) {
+        const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+        cb(null, "product-" + uniqueSuffix + path.extname(file.originalname));
+    }
+});
+
+const fileFilter = (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif|webp/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+
+    if (mimetype && extname) {
+        return cb(null, true);
+    } else {
+        cb(new Error("Only image files are allowed"));
     }
 };
 
-module.exports = authorizeAdmin;
-
-// ==================== USER ROUTES (Authenticated users) ====================
-
-// Get all products (with filtering, pagination, sorting)
-router.get("/", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const {
-			page = 1,
-			limit = 10,
-			sort = "-createdAt",
-			category,
-			minPrice,
-			maxPrice,
-			brand,
-			isFeatured,
-			search,
-			minRating
-		} = req.query;
-
-		const query = { isActive: true };
-
-		// Category filter
-		if (category) {
-			if (mongoose.Types.ObjectId.isValid(category)) {
-				query.category = category;
-			} else {
-				const categoryDoc = await Category.findOne({ slug: category.toLowerCase() });
-				if (categoryDoc) query.category = categoryDoc._id;
-			}
-		}
-
-		// Price range
-		if (minPrice || maxPrice) {
-			query.price = {};
-			if (minPrice) query.price.$gte = parseFloat(minPrice);
-			if (maxPrice) query.price.$lte = parseFloat(maxPrice);
-		}
-
-		// Brand filter
-		if (brand) query.brand = { $regex: brand, $options: "i" };
-
-		// Featured products
-		if (isFeatured === "true") query.isFeatured = true;
-
-		// Search by name or description
-		if (search) {
-			query.$or = [
-				{ name: { $regex: search, $options: "i" } },
-				{ description: { $regex: search, $options: "i" } }
-			];
-		}
-
-		// Minimum rating filter
-		if (minRating) {
-			query.averageRating = { $gte: parseFloat(minRating) };
-		}
-
-		const products = await Product.find(query)
-			.populate("category", "name slug")
-			.sort(sort)
-			.limit(limit * 1)
-			.skip((page - 1) * limit)
-			.lean();
-
-		const total = await Product.countDocuments(query);
-
-		res.json({
-			success: true,
-			products,
-			total,
-			page: parseInt(page),
-			pages: Math.ceil(total / limit)
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+const upload = multer({
+    storage: storage,
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+    fileFilter: fileFilter
 });
 
-// Get single product by ID or slug
-router.get("/:id", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { id } = req.params;
-		let query = { isActive: true };
+// ==============================
+// 📦 PRODUCT ROUTES (Public)
+// ==============================
 
-		if (mongoose.Types.ObjectId.isValid(id)) {
-			query._id = id;
-		} else {
-			query.slug = id.toLowerCase();
-		}
+// 📥 GET ALL PRODUCTS (with filters, sorting, pagination)
+router.get("/", async (req, res) => {
+    try {
+        const { limit = 50 } = req.query;
+        const limitNum = parseInt(limit);
 
-		const product = await Product.findOne(query)
-			.populate("category", "name slug description image")
-			.populate({
-				path: "reviews",
-				match: { status: "approved" },
-				populate: { path: "user", select: "name email" }
-			})
-			.lean();
+        // Build filter for active products only
+        const filter = { isActive: true };
 
-		if (!product) {
-			return res.status(404).json({ success: false, message: "Product not found" });
-		}
+        // Get total count of active products
+        const total = await Product.countDocuments(filter);
 
-		res.json({ success: true, product });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        if (total === 0) {
+            return res.json({
+                success: true,
+                data: [],
+                pagination: {
+                    page: 1,
+                    limit: limitNum,
+                    total: 0,
+                    pages: 0
+                }
+            });
+        }
+
+        // Get random products using MongoDB aggregation
+        // $sample will randomly select documents
+        const randomProducts = await Product.aggregate([
+            { $match: filter },
+            { $sample: { size: Math.min(limitNum, total) } }
+        ]);
+
+        // Extract product IDs from aggregation result
+        const productIds = randomProducts.map(p => p._id);
+
+        // Fetch populated products with all data
+        let products = [];
+        if (productIds.length > 0) {
+            products = await Product.find({ _id: { $in: productIds } })
+                .populate("category", "name slug")
+                .populate({
+                    path: "reviews",
+                    select: "rating comment user",
+                    populate: { path: "user", select: "name avatar" }
+                });
+
+            // Maintain the random order from aggregation
+            const idOrder = productIds.map(id => id.toString());
+            products.sort((a, b) => {
+                return idOrder.indexOf(a._id.toString()) - idOrder.indexOf(b._id.toString());
+            });
+        }
+
+        products.forEach(item => {
+  console.log(item._id);
+  console.log(item.name);
 });
 
 
-// Create new review for a product
-router.post("/:productId/reviews", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { productId } = req.params;
-		const { rating, title, comment, images } = req.body;
-		const userId = req.user._id;
+        res.json({
+            success: true,
+            data: products,
+            pagination: {
+                page: 1,
+                limit: limitNum,
+                total: total,
+                pages: Math.ceil(total / limitNum)
+            }
+        });
 
-		const product = await Product.findById(productId);
-		if (!product) {
-			return res.status(404).json({ success: false, message: "Product not found" });
-		}
-
-		// Check if user already reviewed this product
-		const existingReview = await Review.findOne({ product: productId, user: userId });
-		if (existingReview) {
-			return res.status(400).json({ success: false, message: "You have already reviewed this product" });
-		}
-
-		const review = await Review.create({
-			product: productId,
-			user: userId,
-			rating,
-			title,
-			comment,
-			images: images || [],
-			status: "pending"
-		});
-
-		// Update product's review stats
-		const allReviews = await Review.find({ product: productId, status: "approved" });
-		const totalReviews = allReviews.length;
-		const averageRating = totalReviews > 0
-			? allReviews.reduce((sum, r) => sum + r.rating, 0) / totalReviews
-			: 0;
-
-		await Product.findByIdAndUpdate(productId, {
-			totalReviews,
-			averageRating,
-			$push: { reviews: review._id }
-		});
-
-		res.status(201).json({ success: true, review });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        console.error("Error fetching random products:", error);
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Get product reviews
-router.get("/:productId/reviews", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { productId } = req.params;
-		const { page = 1, limit = 10 } = req.query;
+// 📄 GET SINGLE PRODUCT
+router.get("/:id", async (req, res) => {
+    try {
+        const product = await Product.findById(req.params.id)
+            .populate("category", "name slug description")
+            .populate({
+                path: "reviews",
+                select: "rating comment user createdAt",
+                populate: { path: "user", select: "name avatar" }
+            });
 
-		const reviews = await Review.find({
-			product: productId,
-			status: "approved"
-		})
-			.populate("user", "name email")
-			.sort("-createdAt")
-			.limit(limit * 1)
-			.skip((page - 1) * limit)
-			.lean();
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: "Product not found"
+            });
+        }
 
-		const total = await Review.countDocuments({
-			product: productId,
-			status: "approved"
-		});
+        // Increment view count (optional - if you add views field)
+        // product.views = (product.views || 0) + 1;
+        // await product.save();
 
-		res.json({
-			success: true,
-			reviews,
-			total,
-			page: parseInt(page),
-			pages: Math.ceil(total / limit)
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        res.json({
+            success: true,
+            data: product
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Update own review
-router.put("/reviews/:reviewId", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { reviewId } = req.params;
-		const { rating, title, comment, images } = req.body;
-		const userId = req.user._id;
+// 🔍 SEARCH PRODUCTS
+router.get("/search/:query", async (req, res) => {
+    try {
+        const query = req.params.query;
+        const products = await Product.find({
+            $or: [
+                { name: { $regex: query, $options: "i" } },
+                { description: { $regex: query, $options: "i" } },
+                { brand: { $regex: query, $options: "i" } }
+            ],
+            isActive: true
+        })
+        .populate("category", "name slug")
+        .limit(20);
 
-		const review = await Review.findOne({ _id: reviewId, user: userId });
-		if (!review) {
-			return res.status(404).json({ success: false, message: "Review not found" });
-		}
+        res.json({
+            success: true,
+            count: products.length,
+            data: products
+        });
 
-		review.rating = rating || review.rating;
-		review.title = title || review.title;
-		review.comment = comment || review.comment;
-		review.images = images || review.images;
-		review.isEdited = true;
-		review.editedAt = new Date();
-		review.status = "pending"; // Re-moderate
-
-		await review.save();
-
-		res.json({ success: true, review });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Delete own review
-router.delete("/reviews/:reviewId", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { reviewId } = req.params;
-		const userId = req.user._id;
+// 📊 GET PRODUCTS BY CATEGORY
+router.get("/category/:categorySlug", async (req, res) => {
+    try {
+        const category = await Category.findOne({ slug: req.params.categorySlug });
+        if (!category) {
+            return res.status(404).json({
+                success: false,
+                message: "Category not found"
+            });
+        }
 
-		const review = await Review.findOne({ _id: reviewId, user: userId });
-		if (!review) {
-			return res.status(404).json({ success: false, message: "Review not found" });
-		}
+        const products = await Product.find({
+            category: category._id,
+            isActive: true
+        })
+        .populate("category", "name slug")
+        .sort("-createdAt");
 
-		await review.deleteOne();
+        res.json({
+            success: true,
+            category: category.name,
+            count: products.length,
+            data: products
+        });
 
-		// Update product stats
-		const allReviews = await Review.find({ product: review.product, status: "approved" });
-		const totalReviews = allReviews.length;
-		const averageRating = totalReviews > 0
-			? allReviews.reduce((sum, r) => sum + r.rating, 0) / totalReviews
-			: 0;
-
-		await Product.findByIdAndUpdate(review.product, {
-			totalReviews,
-			averageRating,
-			$pull: { reviews: reviewId }
-		});
-
-		res.json({ success: true, message: "Review deleted successfully" });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Mark review as helpful
-router.post("/reviews/:reviewId/helpful", passport.authenticate("jwt", { session: false }), async (req, res) => {
-	try {
-		const { reviewId } = req.params;
-		const review = await Review.findById(reviewId);
+// 🌟 GET FEATURED PRODUCTS
+router.get("/featured", async (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 6;
+        const products = await Product.find({
+            isFeatured: true,
+            isActive: true
+        })
+        .populate("category", "name slug")
+        .limit(limit);
 
-		if (!review) {
-			return res.status(404).json({ success: false, message: "Review not found" });
-		}
+        res.json({
+            success: true,
+            count: products.length,
+            data: products
+        });
 
-		review.helpfulCount += 1;
-		await review.save();
-
-		res.json({ success: true, helpfulCount: review.helpfulCount });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
+// ==============================
+// 📝 REVIEW ROUTES (Protected)
+// ==============================
 
+// ➕ ADD REVIEW
+router.post("/:productId/review", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const { rating, comment, title } = req.body;
+        const productId = req.params.productId;
 
+        if (!rating || !comment) {
+            return res.status(400).json({
+                success: false,
+                message: "Rating and comment are required"
+            });
+        }
 
+        // Check if product exists
+        const product = await Product.findById(productId);
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: "Product not found"
+            });
+        }
 
+        // Check if user already reviewed this product
+        const existingReview = await Review.findOne({
+            product: productId,
+            user: req.user._id
+        });
 
+        if (existingReview) {
+            return res.status(400).json({
+                success: false,
+                message: "You have already reviewed this product"
+            });
+        }
 
+        // Create review
+        const review = await Review.create({
+            product: productId,
+            user: req.user._id,
+            rating: parseInt(rating),
+            title: title || "",
+            comment,
+            status: "approved" // Auto-approve for now
+        });
 
+        // Add review to product
+        product.reviews.push(review._id);
+        product.totalReviews = product.reviews.length;
 
+        // Calculate average rating
+        const allReviews = await Review.find({ product: productId, status: "approved" });
+        if (allReviews.length > 0) {
+            const totalRating = allReviews.reduce((sum, r) => sum + r.rating, 0);
+            product.averageRating = totalRating / allReviews.length;
+        }
 
-// ==================== ADMIN ROUTES ====================
+        await product.save();
 
-// Create product (Admin only)
-router.post("/", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const {
-			name,
-			slug,
-			description,
-			brand,
-			category,
-			price,
-			discountPrice,
-			costPrice,
-			stock,
-			images,
-			thumbnail,
-			variants,
-			attributes,
-			isActive,
-			isFeatured,
-			isDigital,
-			weight,
-			dimensions,
-			shippingCharge
-		} = req.body;
+        // Add review to user
+        await User.findByIdAndUpdate(req.user._id, {
+            $push: { reviews: review._id }
+        });
 
-		// Check if category exists
-		const categoryExists = await Category.findById(category);
-		if (!categoryExists) {
-			return res.status(400).json({ success: false, message: "Invalid category" });
-		}
+        res.status(201).json({
+            success: true,
+            message: "Review added successfully",
+            data: review
+        });
 
-		// Check if slug is unique
-		const existingProduct = await Product.findOne({ slug });
-		if (existingProduct) {
-			return res.status(400).json({ success: false, message: "Slug already exists" });
-		}
-
-		const product = await Product.create({
-			name,
-			slug: slug.toLowerCase(),
-			description,
-			brand,
-			category,
-			price,
-			discountPrice,
-			costPrice,
-			stock,
-			images,
-			thumbnail,
-			variants,
-			attributes,
-			isActive,
-			isFeatured,
-			isDigital,
-			weight,
-			dimensions,
-			shippingCharge
-		});
-
-		// Update category product count
-		await Category.findByIdAndUpdate(category, { $inc: { productCount: 1 } });
-
-		res.status(201).json({ success: true, product });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Update product (Admin only)
-router.put("/:id", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { id } = req.params;
-		const updates = req.body;
+// ✏️ UPDATE REVIEW
+router.put("/review/:reviewId", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const { rating, comment, title } = req.body;
+        const review = await Review.findById(req.params.reviewId);
 
-		// If slug is being updated, check uniqueness
-		if (updates.slug) {
-			updates.slug = updates.slug.toLowerCase();
-			const existing = await Product.findOne({ slug: updates.slug, _id: { $ne: id } });
-			if (existing) {
-				return res.status(400).json({ success: false, message: "Slug already exists" });
-			}
-		}
+        if (!review) {
+            return res.status(404).json({
+                success: false,
+                message: "Review not found"
+            });
+        }
 
-		// If category is being updated
-		if (updates.category && updates.category !== id) {
-			const categoryExists = await Category.findById(updates.category);
-			if (!categoryExists) {
-				return res.status(400).json({ success: false, message: "Invalid category" });
-			}
-		}
+        // Check if user owns the review
+        if (review.user.toString() !== req.user._id.toString()) {
+            return res.status(403).json({
+                success: false,
+                message: "You can only update your own reviews"
+            });
+        }
 
-		const product = await Product.findByIdAndUpdate(id, updates, { new: true, runValidators: true });
+        // Update review
+        if (rating) review.rating = parseInt(rating);
+        if (comment) review.comment = comment;
+        if (title) review.title = title;
+        review.isEdited = true;
+        review.editedAt = new Date();
 
-		if (!product) {
-			return res.status(404).json({ success: false, message: "Product not found" });
-		}
+        await review.save();
 
-		res.json({ success: true, product });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        // Recalculate product average rating
+        const product = await Product.findById(review.product);
+        const allReviews = await Review.find({ 
+            product: review.product, 
+            status: "approved" 
+        });
+        
+        if (allReviews.length > 0) {
+            const totalRating = allReviews.reduce((sum, r) => sum + r.rating, 0);
+            product.averageRating = totalRating / allReviews.length;
+            await product.save();
+        }
+
+        res.json({
+            success: true,
+            message: "Review updated successfully",
+            data: review
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Delete product (Admin only)
-router.delete("/:id", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { id } = req.params;
-		const product = await Product.findByIdAndDelete(id);
+// ❌ DELETE REVIEW
+router.delete("/review/:reviewId", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const review = await Review.findById(req.params.reviewId);
 
-		if (!product) {
-			return res.status(404).json({ success: false, message: "Product not found" });
-		}
+        if (!review) {
+            return res.status(404).json({
+                success: false,
+                message: "Review not found"
+            });
+        }
 
-		// Remove all reviews for this product
-		await Review.deleteMany({ product: id });
+        // Check if user owns the review or is admin
+        if (review.user.toString() !== req.user._id.toString() && req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "You can only delete your own reviews"
+            });
+        }
 
-		// Update category product count
-		await Category.findByIdAndUpdate(product.category, { $inc: { productCount: -1 } });
+        // Remove review from product
+        await Product.findByIdAndUpdate(review.product, {
+            $pull: { reviews: review._id }
+        });
 
-		res.json({ success: true, message: "Product deleted successfully" });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        // Remove review from user
+        await User.findByIdAndUpdate(review.user, {
+            $pull: { reviews: review._id }
+        });
+
+        // Recalculate product average rating
+        const product = await Product.findById(review.product);
+        const allReviews = await Review.find({ 
+            product: review.product, 
+            status: "approved" 
+        });
+        
+        if (allReviews.length > 0) {
+            const totalRating = allReviews.reduce((sum, r) => sum + r.rating, 0);
+            product.averageRating = totalRating / allReviews.length;
+        } else {
+            product.averageRating = 0;
+        }
+        product.totalReviews = allReviews.length;
+        await product.save();
+
+        // Delete the review
+        await review.deleteOne();
+
+        res.json({
+            success: true,
+            message: "Review deleted successfully"
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Update product stock (Admin only)
-router.patch("/:id/stock", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { id } = req.params;
-		const { stock, variantIndex, variantStock } = req.body;
+// 👍 HELPFUL VOTE ON REVIEW
+router.post("/review/:reviewId/helpful", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        const review = await Review.findById(req.params.reviewId);
+        if (!review) {
+            return res.status(404).json({
+                success: false,
+                message: "Review not found"
+            });
+        }
 
-		const product = await Product.findById(id);
-		if (!product) {
-			return res.status(404).json({ success: false, message: "Product not found" });
-		}
+        // Check if user already voted
+        // You could track this with a separate schema or array
+        review.helpfulCount += 1;
+        await review.save();
 
-		if (variantIndex !== undefined && variantStock !== undefined) {
-			product.variants[variantIndex].stock = variantStock;
-		} else if (stock !== undefined) {
-			product.stock = stock;
-		}
+        res.json({
+            success: true,
+            message: "Voted as helpful",
+            data: { helpfulCount: review.helpfulCount }
+        });
 
-		await product.save();
-		res.json({ success: true, product });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Manage reviews (Admin only)
-router.get("/admin/reviews/all", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { status, page = 1, limit = 20 } = req.query;
-		const query = status ? { status } : {};
+// ==============================
+// 👑 ADMIN PRODUCT ROUTES
+// ==============================
 
-		const reviews = await Review.find(query)
-			.populate("product", "name slug")
-			.populate("user", "name email")
-			.sort("-createdAt")
-			.limit(limit * 1)
-			.skip((page - 1) * limit)
-			.lean();
+// ➕ CREATE PRODUCT (Admin Only)
+router.post("/admin/products", passport.authenticate("jwt", { session: false }), upload.array("images", 5), async (req, res) => {
+    try {
+        // Check admin role
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+ 
+        const {
+            name,
+            description,
+            price,
+            discountPrice,
+            costPrice,
+            stock,
+            brand,
+            category,
+            isActive,
+            isFeatured,
+            isDigital,
+            weight,
+            shippingCharge,
+            variants,
+            attributes
+        } = req.body;
 
-		const total = await Review.countDocuments(query);
+        // Validation
+        if (!name || !description || !price || !category) {
+            return res.status(400).json({
+                success: false,
+                message: "Name, description, price, and category are required"
+            });
+        }
 
-		res.json({
-			success: true,
-			reviews,
-			total,
-			page: parseInt(page),
-			pages: Math.ceil(total / limit)
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        // Generate slug
+        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+        // Check if slug exists
+        const existingProduct = await Product.findOne({ slug });
+        if (existingProduct) {
+            return res.status(400).json({
+                success: false,
+                message: "Product with this name already exists"
+            });
+        }
+
+        // Parse JSON fields
+        let parsedVariants = [];
+        let parsedAttributes = [];
+
+        try {
+            if (variants) parsedVariants = typeof variants === "string" ? JSON.parse(variants) : variants;
+            if (attributes) parsedAttributes = typeof attributes === "string" ? JSON.parse(attributes) : attributes;
+        } catch (e) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid variants or attributes format"
+            });
+        }
+
+        // Handle image uploads
+        const images = req.files.map(file => ({
+            url: `/uploads/products/${file.filename}`,
+            altText: file.originalname
+        }));
+
+        // Set thumbnail as first image
+        const thumbnail = images.length > 0 ? images[0].url : null;
+
+        // Create product
+        const product = await Product.create({
+            name,
+            slug,
+            description,
+            price: parseFloat(price),
+            discountPrice: discountPrice ? parseFloat(discountPrice) : 0,
+            costPrice: costPrice ? parseFloat(costPrice) : 0,
+            stock: parseInt(stock) || 0,
+            brand: brand || null,
+            category: category,
+            images,
+            thumbnail,
+            isActive: isActive === "true" || isActive === true,
+            isFeatured: isFeatured === "true" || isFeatured === true,
+            isDigital: isDigital === "true" || isDigital === true,
+            weight: weight ? parseFloat(weight) : 0,
+            shippingCharge: shippingCharge ? parseFloat(shippingCharge) : 0,
+            variants: parsedVariants,
+            attributes: parsedAttributes
+        });
+
+        // Update category product count
+        await Category.findByIdAndUpdate(category, {
+            $inc: { productCount: 1 }
+        });
+
+        res.status(201).json({
+            success: true,
+            message: "Product created successfully",
+            data: product
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Approve or reject review (Admin only)
-router.patch("/admin/reviews/:reviewId", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { reviewId } = req.params;
-		const { status } = req.body;
+// ✏️ UPDATE PRODUCT (Admin Only)
+router.put("/admin/products/:id", passport.authenticate("jwt", { session: false }), upload.array("images", 5), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		if (!["approved", "rejected", "pending"].includes(status)) {
-			return res.status(400).json({ success: false, message: "Invalid status" });
-		}
+        const product = await Product.findById(req.params.id);
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: "Product not found"
+            });
+        }
 
-		const review = await Review.findById(reviewId);
-		if (!review) {
-			return res.status(404).json({ success: false, message: "Review not found" });
-		}
+        const {
+            name,
+            description,
+            price,
+            discountPrice,
+            costPrice,
+            stock,
+            brand,
+            category,
+            isActive,
+            isFeatured,
+            isDigital,
+            weight,
+            shippingCharge,
+            variants,
+            attributes,
+            removeImages
+        } = req.body;
 
-		review.status = status;
-		await review.save();
+        // Update basic fields
+        if (name) {
+            product.name = name;
+            product.slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        }
+        if (description) product.description = description;
+        if (price) product.price = parseFloat(price);
+        if (discountPrice !== undefined) product.discountPrice = parseFloat(discountPrice);
+        if (costPrice !== undefined) product.costPrice = parseFloat(costPrice);
+        if (stock !== undefined) product.stock = parseInt(stock);
+        if (brand !== undefined) product.brand = brand;
+        if (category) product.category = category;
+        if (isActive !== undefined) product.isActive = isActive === "true" || isActive === true;
+        if (isFeatured !== undefined) product.isFeatured = isFeatured === "true" || isFeatured === true;
+        if (isDigital !== undefined) product.isDigital = isDigital === "true" || isDigital === true;
+        if (weight !== undefined) product.weight = parseFloat(weight);
+        if (shippingCharge !== undefined) product.shippingCharge = parseFloat(shippingCharge);
 
-		// Update product stats if review is approved or rejected
-		const approvedReviews = await Review.find({ product: review.product, status: "approved" });
-		const totalReviews = approvedReviews.length;
-		const averageRating = totalReviews > 0
-			? approvedReviews.reduce((sum, r) => sum + r.rating, 0) / totalReviews
-			: 0;
+        // Parse JSON fields
+        try {
+            if (variants) product.variants = typeof variants === "string" ? JSON.parse(variants) : variants;
+            if (attributes) product.attributes = typeof attributes === "string" ? JSON.parse(attributes) : attributes;
+        } catch (e) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid variants or attributes format"
+            });
+        }
 
-		await Product.findByIdAndUpdate(review.product, {
-			totalReviews,
-			averageRating
-		});
+        // Handle image uploads
+        if (req.files && req.files.length > 0) {
+            const newImages = req.files.map(file => ({
+                url: `/uploads/products/${file.filename}`,
+                altText: file.originalname
+            }));
+            product.images.push(...newImages);
+        }
 
-		res.json({ success: true, review });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        // Remove images
+        if (removeImages) {
+            const removeImageList = typeof removeImages === "string" ? JSON.parse(removeImages) : removeImages;
+            product.images = product.images.filter(img => !removeImageList.includes(img.url));
+        }
+
+        // Update thumbnail if first image exists
+        if (product.images.length > 0 && !product.thumbnail) {
+            product.thumbnail = product.images[0].url;
+        }
+
+        await product.save();
+
+        // Update category product count if category changed
+        if (category && category !== product.category.toString()) {
+            await Category.findByIdAndUpdate(product.category, {
+                $inc: { productCount: -1 }
+            });
+            await Category.findByIdAndUpdate(category, {
+                $inc: { productCount: 1 }
+            });
+        }
+
+        res.json({
+            success: true,
+            message: "Product updated successfully",
+            data: product
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Delete any review (Admin only)
-router.delete("/admin/reviews/:reviewId", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { reviewId } = req.params;
-		const review = await Review.findByIdAndDelete(reviewId);
+// ❌ DELETE PRODUCT (Admin Only)
+router.delete("/admin/products/:id", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		if (!review) {
-			return res.status(404).json({ success: false, message: "Review not found" });
-		}
+        const product = await Product.findById(req.params.id);
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: "Product not found"
+            });
+        }
 
-		// Update product stats
-		const approvedReviews = await Review.find({ product: review.product, status: "approved" });
-		const totalReviews = approvedReviews.length;
-		const averageRating = totalReviews > 0
-			? approvedReviews.reduce((sum, r) => sum + r.rating, 0) / totalReviews
-			: 0;
+        // Delete associated reviews
+        await Review.deleteMany({ product: product._id });
 
-		await Product.findByIdAndUpdate(review.product, {
-			totalReviews,
-			averageRating,
-			$pull: { reviews: reviewId }
-		});
+        // Update category product count
+        await Category.findByIdAndUpdate(product.category, {
+            $inc: { productCount: -1 }
+        });
 
-		res.json({ success: true, message: "Review deleted successfully" });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        // Delete product images from server (optional)
+        // You can implement file deletion here
+
+        await product.deleteOne();
+
+        res.json({
+            success: true,
+            message: "Product deleted successfully"
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
-// Bulk product status update (Admin only)
-router.patch("/admin/bulk/status", passport.authenticate("jwt", { session: false }), authorizeAdmin, async (req, res) => {
-	try {
-		const { productIds, isActive } = req.body;
+// 📊 GET ADMIN PRODUCT STATISTICS (Admin Only)
+router.get("/admin/stats", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
 
-		if (!productIds || !Array.isArray(productIds)) {
-			return res.status(400).json({ success: false, message: "Product IDs array required" });
-		}
+        const totalProducts = await Product.countDocuments();
+        const activeProducts = await Product.countDocuments({ isActive: true });
+        const featuredProducts = await Product.countDocuments({ isFeatured: true });
+        const outOfStock = await Product.countDocuments({ stock: 0 });
 
-		const result = await Product.updateMany(
-			{ _id: { $in: productIds } },
-			{ isActive }
-		);
+        // Products by category
+        const categoryStats = await Product.aggregate([
+            {
+                $group: {
+                    _id: "$category",
+                    count: { $sum: 1 }
+                }
+            },
+            {
+                $lookup: {
+                    from: "categories",
+                    localField: "_id",
+                    foreignField: "_id",
+                    as: "categoryInfo"
+                }
+            },
+            {
+                $project: {
+                    categoryName: { $arrayElemAt: ["$categoryInfo.name", 0] },
+                    count: 1
+                }
+            }
+        ]);
 
-		res.json({ success: true, modifiedCount: result.modifiedCount });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
+        res.json({
+            success: true,
+            data: {
+                totalProducts,
+                activeProducts,
+                featuredProducts,
+                outOfStock,
+                categoryStats
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 🔄 BULK UPDATE PRODUCTS (Admin Only)
+router.put("/admin/products/bulk", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const { productIds, updates } = req.body;
+
+        if (!productIds || !updates || !Array.isArray(productIds)) {
+            return res.status(400).json({
+                success: false,
+                message: "Product IDs and updates are required"
+            });
+        }
+
+        const result = await Product.updateMany(
+            { _id: { $in: productIds } },
+            updates,
+            { runValidators: true }
+        );
+
+        res.json({
+            success: true,
+            message: `Updated ${result.modifiedCount} products`,
+            data: result
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// ==============================
+// 🏷️ PRODUCT VARIANTS MANAGEMENT (Admin Only)
+// ==============================
+
+// ➕ ADD VARIANT TO PRODUCT
+router.post("/admin/products/:id/variants", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const { name, value, price, stock, sku } = req.body;
+        if (!name || !value) {
+            return res.status(400).json({
+                success: false,
+                message: "Variant name and value are required"
+            });
+        }
+
+        const product = await Product.findById(req.params.id);
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: "Product not found"
+            });
+        }
+
+        product.variants.push({
+            name,
+            value,
+            price: price || 0,
+            stock: stock || 0,
+            sku: sku || ""
+        });
+
+        await product.save();
+
+        res.json({
+            success: true,
+            message: "Variant added successfully",
+            data: product.variants
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// ❌ REMOVE VARIANT FROM PRODUCT
+router.delete("/admin/products/:id/variants/:variantIndex", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const product = await Product.findById(req.params.id);
+        if (!product) {
+            return res.status(404).json({
+                success: false,
+                message: "Product not found"
+            });
+        }
+
+        const index = parseInt(req.params.variantIndex);
+        if (index < 0 || index >= product.variants.length) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid variant index"
+            });
+        }
+
+        product.variants.splice(index, 1);
+        await product.save();
+
+        res.json({
+            success: true,
+            message: "Variant removed successfully",
+            data: product.variants
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// ==============================
+// 📈 ANALYTICS (Admin Only)
+// ==============================
+
+// 📊 GET TOP SELLING PRODUCTS
+router.get("/admin/top-selling", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const limit = parseInt(req.query.limit) || 10;
+        const products = await Product.find()
+            .sort({ soldCount: -1 })
+            .limit(limit)
+            .populate("category", "name");
+
+        res.json({
+            success: true,
+            data: products
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
+// 📊 GET LOW STOCK PRODUCTS
+router.get("/admin/low-stock", passport.authenticate("jwt", { session: false }), async (req, res) => {
+    try {
+        if (req.user.role !== "admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied. Admin only."
+            });
+        }
+
+        const threshold = parseInt(req.query.threshold) || 10;
+        const products = await Product.find({
+            stock: { $lte: threshold },
+            isActive: true
+        })
+        .populate("category", "name")
+        .sort({ stock: 1 });
+
+        res.json({
+            success: true,
+            count: products.length,
+            data: products
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
 });
 
 module.exports = router;

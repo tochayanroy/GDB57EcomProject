@@ -1,5 +1,5 @@
 // AddressScreen.tsx
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useRef, useState, useEffect } from 'react';
 import {
     ActivityIndicator,
     Alert,
@@ -27,60 +27,278 @@ import Animated, {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Icon from 'react-native-vector-icons/Feather';
 import MaterialIcon from 'react-native-vector-icons/MaterialIcons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import axios from 'axios';
+import { router, useFocusEffect } from 'expo-router';
 
 const { width } = Dimensions.get('window');
 
-// Types
+// ============================================================================
+// API CONFIGURATION
+// ============================================================================
+
+const API_BASE_URL = 'http://10.225.180.27:5000';
+
+// ============================================================================
+// TYPES & INTERFACES
+// ============================================================================
+
 interface Address {
-    id: string;
-    name: string;
+    _id: string;
+    fullName: string;
     phone: string;
-    addressLine: string;
+    street: string;
     city: string;
     state: string;
-    pinCode: string;
+    zipCode: string;
+    country: string;
     landmark?: string;
     isDefault: boolean;
     addressType: 'Home' | 'Work' | 'Other';
 }
 
-interface UserDetails {
+interface User {
+    _id: string;
+    name: string;
     email: string;
-    savedAddresses: Address[];
+    phone: string;
+    addresses: Address[];
 }
 
-// Mock Data
-const MOCK_USER: UserDetails = {
-    email: 'john.smith@example.com',
-    savedAddresses: [
-        {
-            id: '1',
-            name: 'John Smith',
-            phone: '+91 98765 43210',
-            addressLine: '123 Main Street, Andheri East',
-            city: 'Mumbai',
-            state: 'Maharashtra',
-            pinCode: '400093',
-            landmark: 'Near Metro Station',
-            isDefault: true,
-            addressType: 'Home',
-        },
-        {
-            id: '2',
-            name: 'John Smith',
-            phone: '+91 98765 43210',
-            addressLine: '45 Business Park, Bandra Kurla Complex',
-            city: 'Mumbai',
-            state: 'Maharashtra',
-            pinCode: '400051',
-            landmark: 'Near ICICI Bank',
-            isDefault: false,
-            addressType: 'Work',
-        },
-    ],
+// ============================================================================
+// API SERVICE FUNCTIONS
+// ============================================================================
+
+// Get User Profile with Addresses
+const getUserProfile = async (): Promise<User> => {
+    try {
+        const token = await AsyncStorage.getItem('token');
+        if (!token) {
+            throw new Error('No authentication token found');
+        }
+
+        const response = await axios.get(
+            `${API_BASE_URL}/User/profile`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                }
+            }
+        );
+
+        if (response.data.success) {
+            return response.data.data;
+        } else {
+            throw new Error(response.data.message || 'Failed to fetch user profile');
+        }
+    } catch (error: any) {
+        console.error('Get user profile error:', error.response?.data || error.message);
+        throw error;
+    }
 };
 
-// Components
+// Get User Addresses
+const getUserAddresses = async (): Promise<Address[]> => {
+    try {
+        const token = await AsyncStorage.getItem('token');
+        if (!token) {
+            throw new Error('No authentication token found');
+        }
+
+        const response = await axios.get(
+            `${API_BASE_URL}/User/addresses`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                }
+            }
+        );
+
+        if (response.data.success) {
+            return response.data.data;
+        } else {
+            throw new Error(response.data.message || 'Failed to fetch addresses');
+        }
+    } catch (error: any) {
+        console.error('Get addresses error:', error.response?.data || error.message);
+        throw error;
+    }
+};
+
+// Add Address
+const addAddress = async (addressData: Omit<Address, '_id'>): Promise<Address> => {
+    try {
+        const token = await AsyncStorage.getItem('token');
+        if (!token) {
+            throw new Error('No authentication token found');
+        }
+
+        const response = await axios.post(
+            `${API_BASE_URL}/User/address`,
+            {
+                fullName: addressData.fullName,
+                phone: addressData.phone,
+                street: addressData.street,
+                city: addressData.city,
+                state: addressData.state,
+                zipCode: addressData.zipCode,
+                country: addressData.country || 'India',
+                landmark: addressData.landmark || '',
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                }
+            }
+        );
+
+        if (response.data.success) {
+            // The API returns the updated addresses array
+            // We need to find the newly added address (the last one)
+            const addresses = response.data.data;
+            const newAddress = addresses[addresses.length - 1];
+            return {
+                ...newAddress,
+                isDefault: false,
+                addressType: 'Home',
+            };
+        } else {
+            throw new Error(response.data.message || 'Failed to add address');
+        }
+    } catch (error: any) {
+        console.error('Add address error:', error.response?.data || error.message);
+        throw error;
+    }
+};
+
+// Update Address
+const updateAddress = async (addressId: string, addressData: Partial<Address>): Promise<Address[]> => {
+    try {
+        const token = await AsyncStorage.getItem('token');
+        if (!token) {
+            throw new Error('No authentication token found');
+        }
+
+        const response = await axios.put(
+            `${API_BASE_URL}/User/address/${addressId}`,
+            {
+                fullName: addressData.fullName,
+                phone: addressData.phone,
+                street: addressData.street,
+                city: addressData.city,
+                state: addressData.state,
+                zipCode: addressData.zipCode,
+                country: addressData.country,
+                landmark: addressData.landmark,
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                }
+            }
+        );
+
+        if (response.data.success) {
+            return response.data.data;
+        } else {
+            throw new Error(response.data.message || 'Failed to update address');
+        }
+    } catch (error: any) {
+        console.error('Update address error:', error.response?.data || error.message);
+        throw error;
+    }
+};
+
+// Delete Address
+const deleteAddress = async (addressId: string): Promise<Address[]> => {
+    try {
+        const token = await AsyncStorage.getItem('token');
+        if (!token) {
+            throw new Error('No authentication token found');
+        }
+
+        const response = await axios.delete(
+            `${API_BASE_URL}/User/address/${addressId}`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                }
+            }
+        );
+
+        if (response.data.success) {
+            return response.data.data;
+        } else {
+            throw new Error(response.data.message || 'Failed to delete address');
+        }
+    } catch (error: any) {
+        console.error('Delete address error:', error.response?.data || error.message);
+        throw error;
+    }
+};
+
+// Set Default Address (using update with isDefault flag)
+const setDefaultAddress = async (addressId: string): Promise<Address[]> => {
+    try {
+        const token = await AsyncStorage.getItem('token');
+        if (!token) {
+            throw new Error('No authentication token found');
+        }
+
+        // First, get all addresses
+        const addresses = await getUserAddresses();
+        
+        // Find the address to set as default
+        const addressToUpdate = addresses.find(addr => addr._id === addressId);
+        if (!addressToUpdate) {
+            throw new Error('Address not found');
+        }
+
+        // Update the address (we need to use the update endpoint)
+        // Note: The API might not have a direct "set default" endpoint
+        // We'll update the address and rely on the isDefault flag
+        const response = await axios.put(
+            `${API_BASE_URL}/User/address/${addressId}`,
+            {
+                fullName: addressToUpdate.fullName,
+                phone: addressToUpdate.phone,
+                street: addressToUpdate.street,
+                city: addressToUpdate.city,
+                state: addressToUpdate.state,
+                zipCode: addressToUpdate.zipCode,
+                country: addressToUpdate.country,
+                landmark: addressToUpdate.landmark,
+                // Note: The API might not support setting isDefault directly
+                // We'll handle default selection on the frontend
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                }
+            }
+        );
+
+        if (response.data.success) {
+            return response.data.data;
+        } else {
+            throw new Error(response.data.message || 'Failed to set default address');
+        }
+    } catch (error: any) {
+        console.error('Set default address error:', error.response?.data || error.message);
+        throw error;
+    }
+};
+
+// ============================================================================
+// COMPONENTS
+// ============================================================================
+
 const AnimatedTouchable = Animated.createAnimatedComponent(TouchableOpacity);
 
 const AddressCard: React.FC<{
@@ -104,6 +322,20 @@ const AddressCard: React.FC<{
         scale.value = withTiming(1, { duration: 100 });
     };
 
+    // Determine address type based on available data
+    const getAddressType = (): 'Home' | 'Work' | 'Other' => {
+        // If the address has an addressType field, use it
+        if (address.addressType) {
+            return address.addressType;
+        }
+        // Otherwise, try to infer from the address
+        if (address.street?.toLowerCase().includes('home')) return 'Home';
+        if (address.street?.toLowerCase().includes('office') || address.street?.toLowerCase().includes('work')) return 'Work';
+        return 'Other';
+    };
+
+    const addressType = getAddressType();
+
     return (
         <AnimatedTouchable
             style={[
@@ -120,16 +352,16 @@ const AddressCard: React.FC<{
                 <View style={styles.addressTypeBadge}>
                     <MaterialIcon
                         name={
-                            address.addressType === 'Home'
+                            addressType === 'Home'
                                 ? 'home'
-                                : address.addressType === 'Work'
+                                : addressType === 'Work'
                                 ? 'work'
                                 : 'place'
                         }
                         size={14}
                         color="#2563EB"
                     />
-                    <Text style={styles.addressTypeText}>{address.addressType}</Text>
+                    <Text style={styles.addressTypeText}>{addressType}</Text>
                 </View>
                 {address.isDefault && (
                     <View style={styles.defaultChip}>
@@ -146,10 +378,10 @@ const AddressCard: React.FC<{
                 </View>
             </View>
 
-            <Text style={styles.addressCardName}>{address.name}</Text>
+            <Text style={styles.addressCardName}>{address.fullName}</Text>
             <Text style={styles.addressCardPhone}>{address.phone}</Text>
             <Text style={styles.addressCardText}>
-                {address.addressLine}, {address.city}, {address.state} - {address.pinCode}
+                {address.street}, {address.city}, {address.state} - {address.zipCode}
             </Text>
             {address.landmark && (
                 <Text style={styles.addressCardLandmark}>Landmark: {address.landmark}</Text>
@@ -171,34 +403,35 @@ const AddressCard: React.FC<{
 };
 
 const AddAddressForm: React.FC<{
-    onSave: (address: Omit<Address, 'id'>) => void;
+    onSave: (address: Omit<Address, '_id'>) => void;
     onCancel: () => void;
     initialAddress?: Address;
-}> = ({ onSave, onCancel, initialAddress }) => {
+    isLoading?: boolean;
+}> = ({ onSave, onCancel, initialAddress, isLoading = false }) => {
     const [formData, setFormData] = useState({
-        name: initialAddress?.name || '',
+        fullName: initialAddress?.fullName || '',
         phone: initialAddress?.phone || '',
-        addressLine: initialAddress?.addressLine || '',
+        street: initialAddress?.street || '',
         city: initialAddress?.city || '',
         state: initialAddress?.state || '',
-        pinCode: initialAddress?.pinCode || '',
+        zipCode: initialAddress?.zipCode || '',
         landmark: initialAddress?.landmark || '',
+        country: initialAddress?.country || 'India',
         addressType: initialAddress?.addressType || 'Home' as 'Home' | 'Work' | 'Other',
         isDefault: initialAddress?.isDefault || false,
     });
-    const [isLoading, setIsLoading] = useState(false);
 
     const handleSave = () => {
         // Basic validation
-        if (!formData.name.trim()) {
-            Alert.alert('Error', 'Please enter your name');
+        if (!formData.fullName.trim()) {
+            Alert.alert('Error', 'Please enter your full name');
             return;
         }
         if (!formData.phone.trim()) {
             Alert.alert('Error', 'Please enter your phone number');
             return;
         }
-        if (!formData.addressLine.trim()) {
+        if (!formData.street.trim()) {
             Alert.alert('Error', 'Please enter your address');
             return;
         }
@@ -210,17 +443,12 @@ const AddAddressForm: React.FC<{
             Alert.alert('Error', 'Please enter your state');
             return;
         }
-        if (!formData.pinCode.trim() || formData.pinCode.length < 6) {
+        if (!formData.zipCode.trim() || formData.zipCode.length < 6) {
             Alert.alert('Error', 'Please enter a valid 6-digit PIN code');
             return;
         }
 
-        setIsLoading(true);
-        // Simulate API call
-        setTimeout(() => {
-            setIsLoading(false);
-            onSave(formData);
-        }, 500);
+        onSave(formData);
     };
 
     return (
@@ -278,8 +506,8 @@ const AddAddressForm: React.FC<{
                     <TextInput
                         style={styles.input}
                         placeholder="Enter your full name"
-                        value={formData.name}
-                        onChangeText={(text) => setFormData({ ...formData, name: text })}
+                        value={formData.fullName}
+                        onChangeText={(text) => setFormData({ ...formData, fullName: text })}
                         placeholderTextColor="#94A3B8"
                     />
                 </View>
@@ -301,8 +529,8 @@ const AddAddressForm: React.FC<{
                     <TextInput
                         style={[styles.input, styles.textArea]}
                         placeholder="Enter your street address, house number, etc."
-                        value={formData.addressLine}
-                        onChangeText={(text) => setFormData({ ...formData, addressLine: text })}
+                        value={formData.street}
+                        onChangeText={(text) => setFormData({ ...formData, street: text })}
                         multiline
                         numberOfLines={3}
                         placeholderTextColor="#94A3B8"
@@ -338,8 +566,8 @@ const AddAddressForm: React.FC<{
                         <TextInput
                             style={styles.input}
                             placeholder="6-digit PIN code"
-                            value={formData.pinCode}
-                            onChangeText={(text) => setFormData({ ...formData, pinCode: text })}
+                            value={formData.zipCode}
+                            onChangeText={(text) => setFormData({ ...formData, zipCode: text })}
                             keyboardType="number-pad"
                             maxLength={6}
                             placeholderTextColor="#94A3B8"
@@ -384,72 +612,141 @@ const AddAddressForm: React.FC<{
     );
 };
 
-// Main Component
-const AddressScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
-    const [addresses, setAddresses] = useState<Address[]>(MOCK_USER.savedAddresses);
-    const [selectedAddressId, setSelectedAddressId] = useState<string>(
-        MOCK_USER.savedAddresses.find((addr) => addr.isDefault)?.id || MOCK_USER.savedAddresses[0]?.id || ''
+// Checkout Progress Component
+const CheckoutProgress: React.FC<{ currentStep: number }> = ({ currentStep }) => {
+    const steps = ['Address', 'Payment', 'Confirmation'];
+    
+    return (
+        <View style={styles.progressContainer}>
+            {steps.map((step, index) => (
+                <React.Fragment key={step}>
+                    <View style={styles.progressStep}>
+                        <View style={[styles.progressDot, index <= currentStep && styles.progressDotActive]}>
+                            {index < currentStep && <Icon name="check" size={12} color="#FFFFFF" />}
+                            {index === currentStep && <View style={styles.progressDotInner} />}
+                        </View>
+                        <Text style={[styles.progressLabel, index <= currentStep && styles.progressLabelActive]}>
+                            {step}
+                        </Text>
+                    </View>
+                    {index < steps.length - 1 && (
+                        <View style={[styles.progressLine, index < currentStep && styles.progressLineActive]} />
+                    )}
+                </React.Fragment>
+            ))}
+        </View>
     );
+};
+
+// ============================================================================
+// MAIN COMPONENT
+// ============================================================================
+
+const AddressScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
+    const [addresses, setAddresses] = useState<Address[]>([]);
+    const [selectedAddressId, setSelectedAddressId] = useState<string>('');
     const [showAddForm, setShowAddForm] = useState(false);
     const [editingAddress, setEditingAddress] = useState<Address | undefined>(undefined);
+    const [isLoading, setIsLoading] = useState(true);
+    const [isSaving, setIsSaving] = useState(false);
+    const [refreshing, setRefreshing] = useState(false);
     const scrollViewRef = useRef<ScrollView>(null);
 
-    const selectedAddress = addresses.find((addr) => addr.id === selectedAddressId);
+    const selectedAddress = addresses.find((addr) => addr._id === selectedAddressId);
+
+    // ============================================================================
+    // API FUNCTIONS
+    // ============================================================================
+
+    const loadAddresses = async () => {
+        try {
+            const data = await getUserAddresses();
+            setAddresses(data);
+            
+            // Select default address or first address
+            if (data.length > 0) {
+                const defaultAddr = data.find((addr) => addr.isDefault);
+                setSelectedAddressId(defaultAddr?._id || data[0]._id);
+            } else {
+                setSelectedAddressId('');
+            }
+        } catch (error: any) {
+            console.error('Load addresses error:', error.message);
+            Alert.alert('Error', 'Failed to load addresses. Please try again.');
+        }
+    };
+
+    const loadAllData = async () => {
+        setIsLoading(true);
+        try {
+            await loadAddresses();
+        } catch (error) {
+            // Error already handled in loadAddresses
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const refreshData = async () => {
+        setRefreshing(true);
+        try {
+            await loadAddresses();
+        } catch (error) {
+            // Error already handled in loadAddresses
+        } finally {
+            setRefreshing(false);
+        }
+    };
+
+    // ============================================================================
+    // HANDLERS
+    // ============================================================================
 
     const handleSelectAddress = useCallback((id: string) => {
         setSelectedAddressId(id);
     }, []);
 
-    const handleAddAddress = useCallback((newAddress: Omit<Address, 'id'>) => {
-        const address: Address = {
-            ...newAddress,
-            id: Date.now().toString(),
-        };
-
-        let updatedAddresses = [...addresses, address];
-        
-        // If this address is set as default, remove default from others
-        if (newAddress.isDefault) {
-            updatedAddresses = updatedAddresses.map((addr) => ({
-                ...addr,
-                isDefault: addr.id === address.id,
-            }));
-            setSelectedAddressId(address.id);
+    const handleAddAddress = useCallback(async (newAddress: Omit<Address, '_id'>) => {
+        setIsSaving(true);
+        try {
+            const addedAddress = await addAddress(newAddress);
+            
+            // Refresh addresses from API
+            await loadAddresses();
+            
+            setShowAddForm(false);
+            Alert.alert('Success', 'Address added successfully!');
+        } catch (error: any) {
+            Alert.alert('Error', error.message || 'Failed to add address');
+        } finally {
+            setIsSaving(false);
         }
-        
-        setAddresses(updatedAddresses);
-        setShowAddForm(false);
-        Alert.alert('Success', 'Address added successfully!');
-    }, [addresses]);
+    }, []);
 
     const handleEditAddress = useCallback((address: Address) => {
         setEditingAddress(address);
         setShowAddForm(true);
     }, []);
 
-    const handleUpdateAddress = useCallback((updatedData: Omit<Address, 'id'>) => {
+    const handleUpdateAddress = useCallback(async (updatedData: Omit<Address, '_id'>) => {
         if (!editingAddress) return;
 
-        let updatedAddresses = addresses.map((addr) =>
-            addr.id === editingAddress.id
-                ? { ...addr, ...updatedData }
-                : addr
-        );
-
-        // If this address is set as default, remove default from others
-        if (updatedData.isDefault) {
-            updatedAddresses = updatedAddresses.map((addr) => ({
-                ...addr,
-                isDefault: addr.id === editingAddress.id,
-            }));
-            setSelectedAddressId(editingAddress.id);
+        setIsSaving(true);
+        try {
+            await updateAddress(editingAddress._id, updatedData);
+            
+            // Refresh addresses from API
+            await loadAddresses();
+            
+            setShowAddForm(false);
+            setEditingAddress(undefined);
+            Alert.alert('Success', 'Address updated successfully!');
+        } catch (error: any) {
+            Alert.alert('Error', error.message || 'Failed to update address');
+        } finally {
+            setIsSaving(false);
         }
-
-        setAddresses(updatedAddresses);
-        setShowAddForm(false);
-        setEditingAddress(undefined);
-        Alert.alert('Success', 'Address updated successfully!');
-    }, [addresses, editingAddress]);
+    }, [editingAddress]);
 
     const handleDeleteAddress = useCallback((id: string) => {
         Alert.alert(
@@ -460,35 +757,48 @@ const AddressScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
                 {
                     text: 'Delete',
                     style: 'destructive',
-                    onPress: () => {
-                        const updatedAddresses = addresses.filter((addr) => addr.id !== id);
-                        setAddresses(updatedAddresses);
-                        
-                        // If deleted address was selected, select another one
-                        if (selectedAddressId === id && updatedAddresses.length > 0) {
-                            const defaultAddr = updatedAddresses.find((addr) => addr.isDefault);
-                            setSelectedAddressId(defaultAddr?.id || updatedAddresses[0].id);
+                    onPress: async () => {
+                        try {
+                            await deleteAddress(id);
+                            
+                            // Refresh addresses from API
+                            await loadAddresses();
+                            
+                            Alert.alert('Success', 'Address deleted successfully!');
+                        } catch (error: any) {
+                            Alert.alert('Error', error.message || 'Failed to delete address');
                         }
-                        Alert.alert('Success', 'Address deleted successfully!');
                     },
                 },
             ]
         );
-    }, [addresses, selectedAddressId]);
+    }, []);
 
-    const handleProceedToPayment = useCallback(() => {
-        if (!selectedAddress) {
-            Alert.alert('Error', 'Please select a delivery address');
-            return;
-        }
-        
-        // Navigate to Payment Screen with selected address
-        navigation.navigate('Payment', { selectedAddress });
-    }, [selectedAddress, navigation]);
+    const handleProceedToPayment = () => {
+        router.push('/PaymentScreen');
+    }
+
+    // ============================================================================
+    // EFFECTS
+    // ============================================================================
+
+    useEffect(() => {
+        loadAllData();
+    }, []);
+
+    useFocusEffect(
+        useCallback(() => {
+            loadAddresses();
+        }, [])
+    );
+
+    // ============================================================================
+    // ANIMATIONS
+    // ============================================================================
 
     const stickyBarTranslateY = useSharedValue(100);
     
-    React.useEffect(() => {
+    useEffect(() => {
         stickyBarTranslateY.value = withTiming(0, { duration: 500 });
     }, []);
 
@@ -496,13 +806,32 @@ const AddressScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
         transform: [{ translateY: stickyBarTranslateY.value }],
     }));
 
+    // ============================================================================
+    // LOADING STATE
+    // ============================================================================
+
+    if (isLoading) {
+        return (
+            <SafeAreaView style={[styles.safeArea, styles.loadingContainer]}>
+                <View style={styles.loadingContent}>
+                    <ActivityIndicator size="large" color="#2563EB" />
+                    <Text style={styles.loadingText}>Loading addresses...</Text>
+                </View>
+            </SafeAreaView>
+        );
+    }
+
+    // ============================================================================
+    // RENDER
+    // ============================================================================
+
     return (
         <GestureHandlerRootView style={{ flex: 1 }}>
             <SafeAreaView style={styles.safeArea}>
                 <StatusBar barStyle="dark-content" backgroundColor="#F8FAFC" />
 
                 <Animated.View entering={FadeIn.delay(300)} style={styles.header}>
-                    <TouchableOpacity style={styles.headerButton} onPress={() => navigation.goBack()}>
+                    <TouchableOpacity style={styles.headerButton} onPress={() => router.back()}>
                         <Icon name="arrow-left" size={24} color="#0F172A" />
                     </TouchableOpacity>
                     <Text style={styles.headerTitle}>Select Address</Text>
@@ -530,6 +859,7 @@ const AddressScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
                                 setEditingAddress(undefined);
                             }}
                             initialAddress={editingAddress}
+                            isLoading={isSaving}
                         />
                     ) : (
                         <>
@@ -540,6 +870,8 @@ const AddressScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
                                 removeClippedSubviews={true}
                                 maxToRenderPerBatch={10}
                                 initialNumToRender={8}
+                                refreshing={refreshing}
+                                onRefresh={refreshData}
                             >
                                 {/* Saved Addresses */}
                                 <View style={styles.section}>
@@ -564,12 +896,12 @@ const AddressScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
                                     ) : (
                                         addresses.map((address) => (
                                             <AddressCard
-                                                key={address.id}
+                                                key={address._id}
                                                 address={address}
-                                                isSelected={selectedAddressId === address.id}
-                                                onSelect={() => handleSelectAddress(address.id)}
+                                                isSelected={selectedAddressId === address._id}
+                                                onSelect={() => handleSelectAddress(address._id)}
                                                 onEdit={() => handleEditAddress(address)}
-                                                onDelete={() => handleDeleteAddress(address.id)}
+                                                onDelete={() => handleDeleteAddress(address._id)}
                                             />
                                         ))
                                     )}
@@ -595,34 +927,6 @@ const AddressScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
                                     </View>
                                 </Animated.View>
 
-                                {/* Delivery Options */}
-                                <Animated.View entering={FadeInUp.delay(250)} style={styles.deliveryOptionsCard}>
-                                    <Text style={styles.deliveryOptionsTitle}>Delivery Options</Text>
-                                    <View style={styles.deliveryOption}>
-                                        <View style={styles.deliveryOptionLeft}>
-                                            <View style={styles.deliveryOptionIcon}>
-                                                <Icon name="truck" size={20} color="#2563EB" />
-                                            </View>
-                                            <View>
-                                                <Text style={styles.deliveryOptionName}>Standard Delivery</Text>
-                                                <Text style={styles.deliveryOptionTime}>2-3 business days</Text>
-                                            </View>
-                                        </View>
-                                        <Text style={styles.deliveryOptionPrice}>Free</Text>
-                                    </View>
-                                    <View style={styles.deliveryOption}>
-                                        <View style={styles.deliveryOptionLeft}>
-                                            <View style={styles.deliveryOptionIcon}>
-                                                <Icon name="zap" size={20} color="#F59E0B" />
-                                            </View>
-                                            <View>
-                                                <Text style={styles.deliveryOptionName}>Express Delivery</Text>
-                                                <Text style={styles.deliveryOptionTime}>1-2 business days</Text>
-                                            </View>
-                                        </View>
-                                        <Text style={styles.deliveryOptionPrice}>₹99</Text>
-                                    </View>
-                                </Animated.View>
 
                                 {/* Address Protection */}
                                 <Animated.View entering={FadeInDown.delay(300)} style={styles.protectionCard}>
@@ -648,7 +952,7 @@ const AddressScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
                                 <Text style={styles.deliveryToLabel}>Delivering to</Text>
                                 <Text style={styles.deliveryAddressPreview} numberOfLines={1}>
                                     {selectedAddress
-                                        ? `${selectedAddress.addressLine}, ${selectedAddress.city}`
+                                        ? `${selectedAddress.street}, ${selectedAddress.city}`
                                         : 'No address selected'}
                                 </Text>
                             </View>
@@ -671,36 +975,26 @@ const AddressScreen: React.FC<{ navigation: any }> = ({ navigation }) => {
     );
 };
 
-// Checkout Progress Component (same as in PaymentScreen but step 0)
-const CheckoutProgress: React.FC<{ currentStep: number }> = ({ currentStep }) => {
-    const steps = ['Address', 'Payment', 'Confirmation'];
-    
-    return (
-        <View style={styles.progressContainer}>
-            {steps.map((step, index) => (
-                <React.Fragment key={step}>
-                    <View style={styles.progressStep}>
-                        <View style={[styles.progressDot, index <= currentStep && styles.progressDotActive]}>
-                            {index < currentStep && <Icon name="check" size={12} color="#FFFFFF" />}
-                            {index === currentStep && <View style={styles.progressDotInner} />}
-                        </View>
-                        <Text style={[styles.progressLabel, index <= currentStep && styles.progressLabelActive]}>
-                            {step}
-                        </Text>
-                    </View>
-                    {index < steps.length - 1 && (
-                        <View style={[styles.progressLine, index < currentStep && styles.progressLineActive]} />
-                    )}
-                </React.Fragment>
-            ))}
-        </View>
-    );
-};
+// ============================================================================
+// STYLES
+// ============================================================================
 
 const styles = StyleSheet.create({
     safeArea: {
         flex: 1,
         backgroundColor: '#F8FAFC',
+    },
+    loadingContainer: {
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    loadingContent: {
+        alignItems: 'center',
+    },
+    loadingText: {
+        fontSize: 16,
+        color: '#64748B',
+        marginTop: 16,
     },
     header: {
         flexDirection: 'row',
@@ -762,7 +1056,7 @@ const styles = StyleSheet.create({
         marginBottom: 8,
     },
     progressDotActive: {
-        backgroundColor: '#2563EB',
+        backgroundColor: '#eb2525',
     },
     progressDotInner: {
         width: 8,
@@ -834,7 +1128,7 @@ const styles = StyleSheet.create({
     },
     addressCardSelected: {
         borderColor: '#2563EB',
-        backgroundColor: '#2563EB08',
+        backgroundColor: '#ffffff',
     },
     addressCardHeader: {
         flexDirection: 'row',

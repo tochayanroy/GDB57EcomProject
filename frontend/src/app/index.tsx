@@ -18,7 +18,9 @@ export default function Index() {
             await new Promise(resolve => setTimeout(resolve, 3000));
 
             // Get token from AsyncStorage
+
             const token = await AsyncStorage.getItem("token");
+            console.log(token);
 
             // No token found
             if (!token) {
@@ -27,13 +29,14 @@ export default function Index() {
             }
 
             // Get Profile API
-            const response = await axios.get("https://gdbecom.tochayanroy.in//User/profile",{
+            const response = await axios.get("http://10.225.180.27:5000/User/profile",{
                     headers: {
                         Authorization: `Bearer ${token}`,
                     },
                 }
             );
 
+            console.log(response?.data);
             // API Success
             if (response?.data?.success) {
 

@@ -2,7 +2,8 @@ import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import * as ImagePicker from 'expo-image-picker';
-import { router, useLocalSearchParams } from 'expo-router';
+import { LinearGradient } from 'expo-linear-gradient';
+import { router } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
     ActivityIndicator,
@@ -27,7 +28,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 // ============================================
 // API CONFIGURATION
@@ -40,21 +41,19 @@ const API_BASE_URL = 'http://10.225.180.27:5000';
 // ============================================
 
 interface ProductImage {
-    id?: string;
+    id: string;
     uri: string;
-    url?: string;
     isCover: boolean;
-    altText?: string;
 }
 
 interface ProductVariant {
-    id?: string;
+    id: string;
     name: string;
     options: string[];
 }
 
 interface ProductAttribute {
-    id?: string;
+    id: string;
     name: string;
     value: string;
 }
@@ -65,8 +64,7 @@ interface Category {
     slug: string;
 }
 
-interface ProductData {
-    _id: string;
+interface ProductFormData {
     name: string;
     description: string;
     price: number;
@@ -82,8 +80,6 @@ interface ProductData {
     shippingCharge: number;
     variants: ProductVariant[];
     attributes: ProductAttribute[];
-    images: ProductImage[];
-    thumbnail: string;
 }
 
 // ============================================
@@ -122,46 +118,62 @@ const fetchCategories = async (): Promise<Category[]> => {
     }
 };
 
-// Fetch product by ID
-const fetchProduct = async (id: string): Promise<ProductData> => {
+// Create product API function
+const createProduct = async (formData: FormData): Promise<any> => {
     try {
-        const response = await apiClient.get(`/Product/${id}`);
-        if (response.data.success) {
-            return response.data.data;
-        }
-        throw new Error('Failed to fetch product');
-    } catch (error) {
-        console.error('Error fetching product:', error);
-        throw error;
-    }
-};
-
-// Update product API function
-const updateProduct = async (id: string, formData: FormData): Promise<any> => {
-    try {
-        const response = await apiClient.put(`/admin/products/${id}`, formData, {
+        const response = await apiClient.post('/Product/admin/products', formData, {
             headers: {
                 'Content-Type': 'multipart/form-data',
             },
         });
+        console.log('Product creation response:', response.data);
         return response.data;
     } catch (error) {
-        console.error('Error updating product:', error);
+        console.error('Error creating product:', error);
         throw error;
     }
 };
+
+// ============================================
+// INITIAL FORM DATA
+// ============================================
+
+const initialFormData: ProductFormData = {
+    name: '',
+    description: '',
+    price: 0,
+    discountPrice: 0,
+    costPrice: 0,
+    stock: 0,
+    brand: '',
+    category: '',
+    isActive: true,
+    isFeatured: false,
+    isDigital: false,
+    weight: 0,
+    shippingCharge: 0,
+    variants: [],
+    attributes: [],
+};
+
+const brandOptions = ['Apple', 'Samsung', 'Sony', 'Nike', 'Adidas', 'LG', 'Bose', 'Dell', 'HP', 'Canon'];
 
 // ============================================
 // REUSABLE COMPONENTS
 // ============================================
 
-const SectionCard = ({ title, icon, children }: { title: string; icon?: string; children: React.ReactNode }) => (
+const SectionCard = ({ title, icon, children, onEdit }: { title: string; icon?: string; children: React.ReactNode; onEdit?: () => void }) => (
     <Animated.View entering={FadeInUp.springify().damping(15)} style={styles.sectionCard}>
         <View style={styles.sectionHeader}>
             <View style={styles.sectionTitleContainer}>
                 {icon && <MaterialCommunityIcons name={icon as any} size={20} color="#3B82F6" style={styles.sectionIcon} />}
                 <Text style={styles.sectionTitle}>{title}</Text>
             </View>
+            {onEdit && (
+                <TouchableOpacity onPress={onEdit}>
+                    <Text style={styles.sectionEditText}>Edit</Text>
+                </TouchableOpacity>
+            )}
         </View>
         {children}
     </Animated.View>
@@ -208,32 +220,24 @@ const DropdownField = ({ label, value, onPress, options, required, placeholder, 
     placeholder?: string;
     loading?: boolean;
 }) => {
-    const getDisplayValue = (): string => {
+    const getDisplayValue = () => {
         if (!value) return placeholder || `Select ${label}`;
-
-        if (options && options.length > 0) {
+        
+        if (options.length > 0) {
             const firstItem = options[0];
-
-            // Handle Category objects
-            if (typeof firstItem === 'object' && firstItem !== null && '_id' in firstItem) {
+            
+            if (typeof firstItem === 'object' && firstItem !== null && 'name' in firstItem) {
                 const found = (options as Category[]).find(o => o._id === value);
-                return found ? found.name : String(value);
+                return found ? found.name : value;
             }
-
-            // Handle { value, label } objects
-            if (typeof firstItem === 'object' && firstItem !== null && 'value' in firstItem && 'label' in firstItem) {
+            
+            if (typeof firstItem === 'object' && firstItem !== null && 'label' in firstItem) {
                 const found = (options as { value: string; label: string }[]).find(o => o.value === value);
-                return found ? found.label : String(value);
+                return found ? found.label : value;
             }
         }
-
-        // If options is an array of strings
-        if (Array.isArray(options) && options.length > 0 && typeof options[0] === 'string') {
-            const found = (options as string[]).find(o => o === value);
-            return found || String(value);
-        }
-
-        return String(value) || placeholder || `Select ${label}`;
+        
+        return value;
     };
 
     return (
@@ -272,28 +276,47 @@ const ToggleRow = ({ label, value, onValueChange, description }: {
     </View>
 );
 
-const ImageCard = ({ image, onRemove, onSetCover }: {
-    image: ProductImage;
-    onRemove: () => void;
-    onSetCover: () => void;
+const ImageUploadCard = ({ images, onAddImage, onRemoveImage, onSetCover, loading }: {
+    images: ProductImage[];
+    onAddImage: () => void;
+    onRemoveImage: (id: string) => void;
+    onSetCover: (id: string) => void;
+    loading?: boolean;
 }) => (
-    <View style={styles.imageCard}>
-        <Image source={{ uri: image.uri ? `${API_BASE_URL}${image.uri}` : 'https://via.placeholder.com/200' }} style={styles.imageCardImage} />
-        {image.isCover && (
-            <View style={styles.coverBadge}>
-                <Text style={styles.coverBadgeText}>Cover</Text>
-            </View>
-        )}
-        <View style={styles.imageCardActions}>
-            {!image.isCover && (
-                <TouchableOpacity onPress={onSetCover} style={styles.imageActionButton}>
-                    <Ionicons name="star-outline" size={14} color="#FFFFFF" />
-                </TouchableOpacity>
-            )}
-            <TouchableOpacity onPress={onRemove} style={[styles.imageActionButton, styles.imageActionButtonDanger]}>
-                <Ionicons name="trash-outline" size={14} color="#FFFFFF" />
+    <View style={styles.imageUploadSection}>
+        <View style={styles.imagesGrid}>
+            {images.map((image) => (
+                <View key={image.id} style={styles.imageCard}>
+                    <Image source={{ uri: image.uri }} style={styles.imageCardImage} />
+                    {image.isCover && (
+                        <View style={styles.coverBadge}>
+                            <Text style={styles.coverBadgeText}>Cover</Text>
+                        </View>
+                    )}
+                    <View style={styles.imageCardActions}>
+                        {!image.isCover && (
+                            <TouchableOpacity onPress={() => onSetCover(image.id)} style={styles.imageActionButton}>
+                                <Ionicons name="star-outline" size={14} color="#FFFFFF" />
+                            </TouchableOpacity>
+                        )}
+                        <TouchableOpacity onPress={() => onRemoveImage(image.id)} style={[styles.imageActionButton, styles.imageActionButtonDanger]}>
+                            <Ionicons name="trash-outline" size={14} color="#FFFFFF" />
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            ))}
+            <TouchableOpacity style={styles.addImageButton} onPress={onAddImage} disabled={loading}>
+                {loading ? (
+                    <ActivityIndicator size="small" color="#3B82F6" />
+                ) : (
+                    <>
+                        <Ionicons name="add" size={32} color="#3B82F6" />
+                        <Text style={styles.addImageText}>Add Image</Text>
+                    </>
+                )}
             </TouchableOpacity>
         </View>
+        <Text style={styles.helperText}>Recommended: 1200x1200px, JPG or PNG. Add at least 5 images for better conversion.</Text>
     </View>
 );
 
@@ -301,9 +324,7 @@ const VariantCard = ({ variant, onEdit, onDelete }: { variant: ProductVariant; o
     <View style={styles.variantCard}>
         <View style={styles.variantInfo}>
             <Text style={styles.variantName}>{variant.name}</Text>
-            <Text style={styles.variantOptions}>
-                {variant.options && Array.isArray(variant.options) ? variant.options.join(' • ') : 'No options'}
-            </Text>
+            <Text style={styles.variantOptions}>{variant.options.join(' • ')}</Text>
         </View>
         <View style={styles.variantActions}>
             <TouchableOpacity onPress={onEdit} style={styles.variantActionButton}>
@@ -333,24 +354,44 @@ const AttributeCard = ({ attribute, onEdit, onDelete }: { attribute: ProductAttr
     </View>
 );
 
+const AIInsightCard = () => (
+    <Animated.View entering={FadeInUp.springify()} style={styles.aiInsightCard}>
+        <LinearGradient
+            colors={['#8B5CF6', '#6366F1']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.aiInsightGradient}
+        >
+            <View style={styles.aiInsightContent}>
+                <View style={styles.aiInsightIcon}>
+                    <MaterialCommunityIcons name="robot-outline" size={24} color="#FFFFFF" />
+                </View>
+                <View style={styles.aiInsightText}>
+                    <Text style={styles.aiInsightTitle}>AI Product Recommendations</Text>
+                    <Text style={styles.aiInsightMessage}>
+                        Products with 5+ images convert 24% better. Adding detailed descriptions and specifications 
+                        can improve search visibility by 40%. Consider setting a competitive sale price.
+                    </Text>
+                </View>
+            </View>
+        </LinearGradient>
+    </Animated.View>
+);
+
 // ============================================
-// MAIN EDIT PRODUCT SCREEN
+// MAIN ADD PRODUCT SCREEN
 // ============================================
 
-export default function EditProductScreen() {
+export default function AddProductScreen() {
     const insets = useSafeAreaInsets();
-    const { id } = useLocalSearchParams<{ id: string }>();
-    const [loading, setLoading] = useState(true);
-    const [isSaving, setIsSaving] = useState(false);
-    const [categories, setCategories] = useState<Category[]>([]);
-    const [product, setProduct] = useState<ProductData | null>(null);
+    const [formData, setFormData] = useState<ProductFormData>(initialFormData);
     const [images, setImages] = useState<ProductImage[]>([]);
-    const [removedImages, setRemovedImages] = useState<string[]>([]);
+    const [isSaving, setIsSaving] = useState(false);
+    const [loading, setLoading] = useState(false);
+    const [categories, setCategories] = useState<Category[]>([]);
     const [showCategoryPicker, setShowCategoryPicker] = useState(false);
     const [showBrandPicker, setShowBrandPicker] = useState(false);
     const scrollY = useSharedValue(0);
-
-    const brandOptions = ['Apple', 'Samsung', 'Sony', 'Nike', 'Adidas', 'LG', 'Bose', 'Dell', 'HP', 'Canon'];
 
     const scrollHandler = useAnimatedScrollHandler({
         onScroll: (event) => {
@@ -363,65 +404,36 @@ export default function EditProductScreen() {
         shadowOpacity: scrollY.value > 10 ? 0.05 : 0,
     }));
 
-    // Load data on mount
+    // Load categories on mount
     useEffect(() => {
-        if (id) {
-            loadData(id);
-        } else {
-            Alert.alert('Error', 'Product ID is missing');
-            router.back();
-        }
-    }, [id]);
+        loadCategories();
+        requestPermissions();
+    }, []);
 
-    const loadData = async (productId: string) => {
+    const requestPermissions = async () => {
+        if (Platform.OS !== 'web') {
+            const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+            if (status !== 'granted') {
+                Alert.alert('Permission Needed', 'Please grant camera roll permissions to upload product images.');
+            }
+        }
+    };
+
+    const loadCategories = async () => {
         setLoading(true);
         try {
-            // Fetch product and categories in parallel
-            const [productData, categoriesData] = await Promise.all([
-                fetchProduct(productId),
-                fetchCategories()
-            ]);
-
-            setProduct(productData);
-            setCategories(categoriesData);
-
-            // Map product images to local format
-            if (productData.images && productData.images.length > 0) {
-                const mappedImages = productData.images.map((img: any, index: number) => ({
-                    id: img._id || img.id || `img_${index}`,
-                    uri: img.url || img.uri || '',
-                    url: img.url || '',
-                    isCover: index === 0 || img.isCover || false,
-                    altText: img.altText || ''
-                }));
-                // Set first image as cover if none is marked
-                if (mappedImages.length > 0 && !mappedImages.some(img => img.isCover)) {
-                    mappedImages[0].isCover = true;
-                }
-                setImages(mappedImages);
-            }
-
-            // Request permissions
-            if (Platform.OS !== 'web') {
-                await ImagePicker.requestMediaLibraryPermissionsAsync();
-            }
-        } catch (error: any) {
-            console.error('Error loading data:', error);
-            Alert.alert(
-                'Error',
-                error.response?.data?.message || 'Failed to load product data. Please try again.'
-            );
-            router.back();
+            const data = await fetchCategories();
+            setCategories(data);
+        } catch (error) {
+            console.error('Error loading categories:', error);
         } finally {
             setLoading(false);
         }
     };
 
-    const updateField = useCallback((field: keyof ProductData, value: any) => {
-        if (product) {
-            setProduct({ ...product, [field]: value });
-        }
-    }, [product]);
+    const updateField = useCallback((field: keyof ProductFormData, value: any) => {
+        setFormData(prev => ({ ...prev, [field]: value }));
+    }, []);
 
     const pickImage = useCallback(async () => {
         const result = await ImagePicker.launchImageLibraryAsync({
@@ -433,7 +445,7 @@ export default function EditProductScreen() {
 
         if (!result.canceled) {
             const newImage: ProductImage = {
-                id: `new_${Date.now()}`,
+                id: Date.now().toString(),
                 uri: result.assets[0].uri,
                 isCover: images.length === 0,
             };
@@ -441,15 +453,9 @@ export default function EditProductScreen() {
         }
     }, [images.length]);
 
-    const removeImage = useCallback((imageId: string) => {
+    const removeImage = useCallback((id: string) => {
         setImages(prev => {
-            const imageToRemove = prev.find(img => img.id === imageId);
-            // Track removed images (only existing ones, not newly added)
-            if (imageToRemove && imageToRemove.url && !imageId.startsWith('new_')) {
-                setRemovedImages(prevRemoved => [...prevRemoved, imageToRemove.url!]);
-            }
-
-            const newImages = prev.filter(img => img.id !== imageId);
+            const newImages = prev.filter(img => img.id !== id);
             if (newImages.length > 0 && !newImages.some(img => img.isCover)) {
                 newImages[0].isCover = true;
             }
@@ -457,79 +463,66 @@ export default function EditProductScreen() {
         });
     }, []);
 
-    const setCoverImage = useCallback((imageId: string) => {
+    const setCoverImage = useCallback((id: string) => {
         setImages(prev => prev.map(img => ({
             ...img,
-            isCover: img.id === imageId
+            isCover: img.id === id
         })));
     }, []);
 
     const addVariant = useCallback(() => {
-        if (product) {
-            const newVariant: ProductVariant = {
-                id: Date.now().toString(),
-                name: 'New Variant',
-                options: ['Option 1', 'Option 2'],
-            };
-            setProduct({
-                ...product,
-                variants: [...(product.variants || []), newVariant]
-            });
-        }
-    }, [product]);
+        const newVariant: ProductVariant = {
+            id: Date.now().toString(),
+            name: 'New Variant',
+            options: ['Option 1', 'Option 2'],
+        };
+        setFormData(prev => ({
+            ...prev,
+            variants: [...prev.variants, newVariant]
+        }));
+    }, []);
 
-    const removeVariant = useCallback((variantId: string) => {
-        if (product) {
-            setProduct({
-                ...product,
-                variants: (product.variants || []).filter(v => (v.id || v.name) !== variantId)
-            });
-        }
-    }, [product]);
+    const removeVariant = useCallback((id: string) => {
+        setFormData(prev => ({
+            ...prev,
+            variants: prev.variants.filter(v => v.id !== id)
+        }));
+    }, []);
 
     const addAttribute = useCallback(() => {
-        if (product) {
-            const newAttribute: ProductAttribute = {
-                id: Date.now().toString(),
-                name: 'New Attribute',
-                value: 'Value',
-            };
-            setProduct({
-                ...product,
-                attributes: [...(product.attributes || []), newAttribute]
-            });
-        }
-    }, [product]);
+        const newAttribute: ProductAttribute = {
+            id: Date.now().toString(),
+            name: 'New Attribute',
+            value: 'Value',
+        };
+        setFormData(prev => ({
+            ...prev,
+            attributes: [...prev.attributes, newAttribute]
+        }));
+    }, []);
 
-    const removeAttribute = useCallback((attributeId: string) => {
-        if (product) {
-            setProduct({
-                ...product,
-                attributes: (product.attributes || []).filter(a => (a.id || a.name) !== attributeId)
-            });
-        }
-    }, [product]);
+    const removeAttribute = useCallback((id: string) => {
+        setFormData(prev => ({
+            ...prev,
+            attributes: prev.attributes.filter(a => a.id !== id)
+        }));
+    }, []);
 
     const handleSubmit = useCallback(async () => {
-        if (!product) {
-            Alert.alert('Error', 'Product data is not loaded');
-            return;
-        }
-
         // Validate required fields
-        if (!product.name.trim()) {
+        if (!formData.name.trim()) {
             Alert.alert('Validation Error', 'Product name is required');
             return;
         }
-        if (!product.description.trim()) {
+        if (!formData.description.trim()) {
             Alert.alert('Validation Error', 'Product description is required');
             return;
         }
-        if (product.price <= 0) {
+        if (formData.price <= 0) {
             Alert.alert('Validation Error', 'Valid price is required');
             return;
         }
-        if (!product.category) {
+        if (!formData.category) {
             Alert.alert('Validation Error', 'Please select a category');
             return;
         }
@@ -544,46 +537,42 @@ export default function EditProductScreen() {
             const formDataToSend = new FormData();
 
             // Append basic fields
-            formDataToSend.append('name', product.name);
-            formDataToSend.append('description', product.description);
-            formDataToSend.append('price', String(product.price));
-            formDataToSend.append('discountPrice', String(product.discountPrice || 0));
-            formDataToSend.append('costPrice', String(product.costPrice || 0));
-            formDataToSend.append('stock', String(product.stock || 0));
-            formDataToSend.append('brand', product.brand || '');
-            formDataToSend.append('category', product.category);
-            formDataToSend.append('isActive', String(product.isActive));
-            formDataToSend.append('isFeatured', String(product.isFeatured));
-            formDataToSend.append('isDigital', String(product.isDigital));
-            formDataToSend.append('weight', String(product.weight || 0));
-            formDataToSend.append('shippingCharge', String(product.shippingCharge || 0));
+            formDataToSend.append('name', formData.name);
+            formDataToSend.append('description', formData.description);
+            formDataToSend.append('price', String(formData.price));
+            formDataToSend.append('discountPrice', String(formData.discountPrice || 0));
+            formDataToSend.append('costPrice', String(formData.costPrice || 0));
+            formDataToSend.append('stock', String(formData.stock || 0));
+            formDataToSend.append('brand', formData.brand || '');
+            formDataToSend.append('category', formData.category);
+            formDataToSend.append('isActive', String(formData.isActive));
+            formDataToSend.append('isFeatured', String(formData.isFeatured));
+            formDataToSend.append('isDigital', String(formData.isDigital));
+            formDataToSend.append('weight', String(formData.weight || 0));
+            formDataToSend.append('shippingCharge', String(formData.shippingCharge || 0));
 
             // Append variants if any
-            if (product.variants && product.variants.length > 0) {
-                const variantData = product.variants.map(v => ({
+            if (formData.variants.length > 0) {
+                const variantData = formData.variants.map(v => ({
                     name: v.name,
-                    options: v.options || []
+                    options: v.options,
+                    price: 0,
+                    stock: 0
                 }));
                 formDataToSend.append('variants', JSON.stringify(variantData));
             }
 
             // Append attributes if any
-            if (product.attributes && product.attributes.length > 0) {
-                const attributeData = product.attributes.map(a => ({
+            if (formData.attributes.length > 0) {
+                const attributeData = formData.attributes.map(a => ({
                     name: a.name,
                     value: a.value
                 }));
                 formDataToSend.append('attributes', JSON.stringify(attributeData));
             }
 
-            // Append removed images
-            if (removedImages.length > 0) {
-                formDataToSend.append('removeImages', JSON.stringify(removedImages));
-            }
-
-            // Append new images (only those that don't have a url)
-            const newImages = images.filter(img => !img.url || img.id?.startsWith('new_'));
-            newImages.forEach((image, index) => {
+            // Append images
+            images.forEach((image, index) => {
                 formDataToSend.append('images', {
                     uri: image.uri,
                     type: 'image/jpeg',
@@ -591,36 +580,24 @@ export default function EditProductScreen() {
                 } as any);
             });
 
-            const response = await updateProduct(id, formDataToSend);
-
+            const response = await createProduct(formDataToSend);
             if (response.success) {
                 Alert.alert(
                     'Success',
-                    'Product updated successfully!',
-                    [
-                        {
-                            text: 'View Product',
-                            onPress: () => router.push(`/admin/products/${id}`)
-                        },
-                        {
-                            text: 'Back to Products',
-                            onPress: () => router.back()
-                        }
-                    ]
-                );
+                    'Product created successfully!');
             } else {
-                Alert.alert('Error', response.message || 'Failed to update product');
+                Alert.alert('Error', response.message || 'Failed to create product');
             }
         } catch (error: any) {
-            console.error('Update error:', error);
+            console.error('Submit error:', error);
             Alert.alert(
                 'Error',
-                error.response?.data?.message || 'Failed to update product. Please try again.'
+                error.response?.data?.message || 'Failed to create product. Please try again.'
             );
         } finally {
             setIsSaving(false);
         }
-    }, [product, images, removedImages, id]);
+    }, [formData, images]);
 
     // Render picker modal
     const renderPickerModal = (title: string, items: any[], selectedId: string | null, onSelect: (id: any) => void, onClose: () => void, labelKey: string = 'name', valueKey: string = '_id') => {
@@ -634,33 +611,29 @@ export default function EditProductScreen() {
                         </TouchableOpacity>
                     </View>
                     <ScrollView style={styles.modalList}>
-                        {items.map((item) => {
-                            const itemValue = item[valueKey] || item.value || item;
-                            const itemLabel = item[labelKey] || item.label || item.name || String(item);
-                            return (
-                                <TouchableOpacity
-                                    key={itemValue}
-                                    style={[
-                                        styles.modalItem,
-                                        selectedId === itemValue && styles.modalItemSelected
-                                    ]}
-                                    onPress={() => {
-                                        onSelect(itemValue);
-                                        onClose();
-                                    }}
-                                >
-                                    <Text style={[
-                                        styles.modalItemText,
-                                        selectedId === itemValue && styles.modalItemTextSelected
-                                    ]}>
-                                        {itemLabel}
-                                    </Text>
-                                    {selectedId === itemValue && (
-                                        <Ionicons name="checkmark-circle" size={20} color="#3B82F6" />
-                                    )}
-                                </TouchableOpacity>
-                            );
-                        })}
+                        {items.map((item) => (
+                            <TouchableOpacity
+                                key={item[valueKey] || item.value || item}
+                                style={[
+                                    styles.modalItem,
+                                    selectedId === (item[valueKey] || item.value || item) && styles.modalItemSelected
+                                ]}
+                                onPress={() => {
+                                    onSelect(item[valueKey] || item.value || item);
+                                    onClose();
+                                }}
+                            >
+                                <Text style={[
+                                    styles.modalItemText,
+                                    selectedId === (item[valueKey] || item.value || item) && styles.modalItemTextSelected
+                                ]}>
+                                    {item[labelKey] || item.label || item.name || item}
+                                </Text>
+                                {selectedId === (item[valueKey] || item.value || item) && (
+                                    <Ionicons name="checkmark-circle" size={20} color="#3B82F6" />
+                                )}
+                            </TouchableOpacity>
+                        ))}
                         {items.length === 0 && (
                             <Text style={styles.modalEmptyText}>No options available</Text>
                         )}
@@ -669,27 +642,6 @@ export default function EditProductScreen() {
             </View>
         );
     };
-
-    if (loading) {
-        return (
-            <SafeAreaView style={[styles.container, styles.centered]}>
-                <ActivityIndicator size="large" color="#3B82F6" />
-                <Text style={styles.loadingText}>Loading product...</Text>
-            </SafeAreaView>
-        );
-    }
-
-    if (!product) {
-        return (
-            <SafeAreaView style={[styles.container, styles.centered]}>
-                <MaterialCommunityIcons name="alert-circle" size={60} color="#EF4444" />
-                <Text style={styles.errorText}>Product not found</Text>
-                <TouchableOpacity style={styles.errorButton} onPress={() => router.back()}>
-                    <Text style={styles.errorButtonText}>Go Back</Text>
-                </TouchableOpacity>
-            </SafeAreaView>
-        );
-    }
 
     return (
         <SafeAreaView style={styles.container} edges={['top']}>
@@ -700,9 +652,9 @@ export default function EditProductScreen() {
                     <TouchableOpacity style={styles.headerButton} onPress={() => router.back()}>
                         <Ionicons name="arrow-back" size={24} color="#1F2937" />
                     </TouchableOpacity>
-                    <Text style={styles.headerTitle}>Edit Product</Text>
-                    <TouchableOpacity
-                        onPress={handleSubmit}
+                    <Text style={styles.headerTitle}>Add Product</Text>
+                    <TouchableOpacity 
+                        onPress={handleSubmit} 
                         style={[styles.headerButton, styles.headerSaveButton]}
                         disabled={isSaving}
                     >
@@ -727,29 +679,20 @@ export default function EditProductScreen() {
                     <View style={styles.previewContainer}>
                         <View style={styles.previewImagePlaceholder}>
                             {images.length > 0 ? (
-                                <Image
-                                    source={{
-                                        uri: images.find(i => i.isCover)?.uri
-                                            ? `${API_BASE_URL}${images.find(i => i.isCover).uri}`
-                                            : images[0]?.uri
-                                                ? `${API_BASE_URL}${images[0].uri}`
-                                                : 'https://via.placeholder.com/200'
-                                    }}
-                                    style={styles.previewImage}
-                                />
+                                <Image source={{ uri: images.find(i => i.isCover)?.uri || images[0].uri }} style={styles.previewImage} />
                             ) : (
                                 <MaterialCommunityIcons name="image-plus" size={32} color="#9CA3AF" />
                             )}
                         </View>
                         <View style={styles.previewInfo}>
-                            <Text style={styles.previewName}>{product.name || 'New Product'}</Text>
+                            <Text style={styles.previewName}>{formData.name || 'New Product'}</Text>
                             <Text style={styles.previewMeta}>
-                                {categories.find(c => c._id === product.category)?.name || 'No Category'}
-                                {product.brand ? ` • ${product.brand}` : ''}
+                                {categories.find(c => c._id === formData.category)?.name || 'No Category'} 
+                                {formData.brand ? ` • ${formData.brand}` : ''}
                             </Text>
                             <View style={styles.previewStatus}>
-                                <View style={[styles.previewStatusDot, { backgroundColor: product.isActive ? '#10B981' : '#EF4444' }]} />
-                                <Text style={styles.previewStatusText}>{product.isActive ? 'Active' : 'Inactive'}</Text>
+                                <View style={[styles.previewStatusDot, { backgroundColor: formData.isActive ? '#10B981' : '#EF4444' }]} />
+                                <Text style={styles.previewStatusText}>{formData.isActive ? 'Active' : 'Inactive'}</Text>
                             </View>
                         </View>
                     </View>
@@ -757,37 +700,27 @@ export default function EditProductScreen() {
 
                 {/* Product Images */}
                 <SectionCard title="Product Images" icon="image-multiple">
-                    <View style={styles.imageUploadSection}>
-                        <View style={styles.imagesGrid}>
-                            {images.map((image) => (
-                                <ImageCard
-                                    key={image.id}
-                                    image={image}
-                                    onRemove={() => removeImage(image.id!)}
-                                    onSetCover={() => setCoverImage(image.id!)}
-                                />
-                            ))}
-                            <TouchableOpacity style={styles.addImageButton} onPress={pickImage} disabled={isSaving}>
-                                <Ionicons name="add" size={32} color="#3B82F6" />
-                                <Text style={styles.addImageText}>Add Image</Text>
-                            </TouchableOpacity>
-                        </View>
-                        <Text style={styles.helperText}>Recommended: 1200x1200px, JPG or PNG. Add at least 5 images for better conversion.</Text>
-                    </View>
+                    <ImageUploadCard
+                        images={images}
+                        onAddImage={pickImage}
+                        onRemoveImage={removeImage}
+                        onSetCover={setCoverImage}
+                        loading={loading}
+                    />
                 </SectionCard>
 
                 {/* Basic Information */}
                 <SectionCard title="Basic Information" icon="information-outline">
                     <InputField
                         label="Product Name"
-                        value={product.name}
+                        value={formData.name}
                         onChangeText={(v) => updateField('name', v)}
                         placeholder="Enter product name"
                         required
                     />
                     <InputField
                         label="Description"
-                        value={product.description}
+                        value={formData.description}
                         onChangeText={(v) => updateField('description', v)}
                         placeholder="Detailed product description"
                         multiline
@@ -796,14 +729,14 @@ export default function EditProductScreen() {
                     <View style={styles.rowFields}>
                         <DropdownField
                             label="Brand"
-                            value={product.brand}
+                            value={formData.brand}
                             onPress={() => setShowBrandPicker(true)}
                             options={brandOptions}
                             loading={loading}
                         />
                         <DropdownField
                             label="Category"
-                            value={product.category}
+                            value={formData.category}
                             onPress={() => setShowCategoryPicker(true)}
                             options={categories}
                             required
@@ -812,7 +745,7 @@ export default function EditProductScreen() {
                     </View>
                     <ToggleRow
                         label="Digital Product"
-                        value={product.isDigital}
+                        value={formData.isDigital}
                         onValueChange={(v) => updateField('isDigital', v)}
                         description="Toggle if this is a digital/downloadable product"
                     />
@@ -823,7 +756,7 @@ export default function EditProductScreen() {
                     <View style={styles.rowFields}>
                         <InputField
                             label="Regular Price"
-                            value={product.price.toString()}
+                            value={formData.price.toString()}
                             onChangeText={(v) => updateField('price', parseFloat(v) || 0)}
                             placeholder="0.00"
                             keyboardType="numeric"
@@ -831,7 +764,7 @@ export default function EditProductScreen() {
                         />
                         <InputField
                             label="Discount Price"
-                            value={product.discountPrice.toString()}
+                            value={formData.discountPrice.toString()}
                             onChangeText={(v) => updateField('discountPrice', parseFloat(v) || 0)}
                             placeholder="0.00"
                             keyboardType="numeric"
@@ -840,24 +773,24 @@ export default function EditProductScreen() {
                     <View style={styles.rowFields}>
                         <InputField
                             label="Cost Price"
-                            value={product.costPrice.toString()}
+                            value={formData.costPrice.toString()}
                             onChangeText={(v) => updateField('costPrice', parseFloat(v) || 0)}
                             placeholder="0.00"
                             keyboardType="numeric"
                         />
                         <InputField
                             label="Shipping Charge"
-                            value={product.shippingCharge.toString()}
+                            value={formData.shippingCharge.toString()}
                             onChangeText={(v) => updateField('shippingCharge', parseFloat(v) || 0)}
                             placeholder="0.00"
                             keyboardType="numeric"
                         />
                     </View>
-                    {product.price > 0 && product.discountPrice > 0 && product.discountPrice < product.price && (
+                    {formData.price > 0 && formData.discountPrice > 0 && formData.discountPrice < formData.price && (
                         <View style={styles.discountBadge}>
                             <MaterialCommunityIcons name="sale" size={16} color="#10B981" />
                             <Text style={styles.discountText}>
-                                Save ${(product.price - product.discountPrice).toFixed(2)} ({Math.round((1 - product.discountPrice / product.price) * 100)}% off)
+                                Save ${(formData.price - formData.discountPrice).toFixed(2)} ({Math.round((1 - formData.discountPrice / formData.price) * 100)}% off)
                             </Text>
                         </View>
                     )}
@@ -867,7 +800,7 @@ export default function EditProductScreen() {
                 <SectionCard title="Inventory" icon="package-variant">
                     <InputField
                         label="Stock Quantity"
-                        value={product.stock.toString()}
+                        value={formData.stock.toString()}
                         onChangeText={(v) => updateField('stock', parseInt(v) || 0)}
                         placeholder="0"
                         keyboardType="numeric"
@@ -875,7 +808,7 @@ export default function EditProductScreen() {
                     />
                     <InputField
                         label="Weight (kg)"
-                        value={product.weight.toString()}
+                        value={formData.weight.toString()}
                         onChangeText={(v) => updateField('weight', parseFloat(v) || 0)}
                         placeholder="0"
                         keyboardType="numeric"
@@ -884,12 +817,12 @@ export default function EditProductScreen() {
 
                 {/* Product Variants */}
                 <SectionCard title="Variants" icon="view-grid">
-                    {(product.variants || []).map((variant) => (
+                    {formData.variants.map((variant) => (
                         <VariantCard
-                            key={variant.id || variant.name}
+                            key={variant.id}
                             variant={variant}
-                            onEdit={() => { }}
-                            onDelete={() => removeVariant(variant.id || variant.name)}
+                            onEdit={() => {}}
+                            onDelete={() => removeVariant(variant.id)}
                         />
                     ))}
                     <TouchableOpacity style={styles.addButton} onPress={addVariant}>
@@ -900,12 +833,12 @@ export default function EditProductScreen() {
 
                 {/* Product Attributes */}
                 <SectionCard title="Attributes" icon="format-list-bulleted">
-                    {(product.attributes || []).map((attribute) => (
+                    {formData.attributes.map((attribute) => (
                         <AttributeCard
-                            key={attribute.id || attribute.name}
+                            key={attribute.id}
                             attribute={attribute}
-                            onEdit={() => { }}
-                            onDelete={() => removeAttribute(attribute.id || attribute.name)}
+                            onEdit={() => {}}
+                            onDelete={() => removeAttribute(attribute.id)}
                         />
                     ))}
                     <TouchableOpacity style={styles.addButton} onPress={addAttribute}>
@@ -918,36 +851,42 @@ export default function EditProductScreen() {
                 <SectionCard title="Visibility & Status" icon="eye">
                     <ToggleRow
                         label="Active Product"
-                        value={product.isActive}
+                        value={formData.isActive}
                         onValueChange={(v) => updateField('isActive', v)}
                         description="Make product visible on the store"
                     />
                     <ToggleRow
                         label="Featured Product"
-                        value={product.isFeatured}
+                        value={formData.isFeatured}
                         onValueChange={(v) => updateField('isFeatured', v)}
                         description="Display on homepage featured section"
                     />
                 </SectionCard>
+
+                {/* AI Recommendations */}
+                <AIInsightCard />
             </Animated.ScrollView>
 
             {/* Sticky Bottom Action Bar */}
             <Animated.View entering={FadeInUp.springify()} style={[styles.bottomActionBar, { paddingBottom: insets.bottom + 16 }]}>
-                <TouchableOpacity
-                    style={styles.secondaryButton}
-                    onPress={() => router.back()}
+                <TouchableOpacity 
+                    style={styles.secondaryButton} 
+                    onPress={() => {
+                        setFormData(initialFormData);
+                        setImages([]);
+                    }}
                 >
-                    <Text style={styles.secondaryButtonText}>Cancel</Text>
+                    <Text style={styles.secondaryButtonText}>Reset</Text>
                 </TouchableOpacity>
-                <TouchableOpacity
-                    style={styles.primaryButton}
+                <TouchableOpacity 
+                    style={styles.primaryButton} 
                     onPress={handleSubmit}
                     disabled={isSaving}
                 >
                     {isSaving ? (
                         <ActivityIndicator color="#FFFFFF" />
                     ) : (
-                        <Text style={styles.primaryButtonText}>Update Product</Text>
+                        <Text style={styles.primaryButtonText}>Create Product</Text>
                     )}
                 </TouchableOpacity>
             </Animated.View>
@@ -956,7 +895,7 @@ export default function EditProductScreen() {
             {showCategoryPicker && renderPickerModal(
                 'Select Category',
                 categories,
-                product.category,
+                formData.category,
                 (id) => updateField('category', id),
                 () => setShowCategoryPicker(false)
             )}
@@ -964,7 +903,7 @@ export default function EditProductScreen() {
             {showBrandPicker && renderPickerModal(
                 'Select Brand',
                 brandOptions.map(b => ({ name: b, value: b })),
-                product.brand,
+                formData.brand,
                 (value) => updateField('brand', value),
                 () => setShowBrandPicker(false),
                 'name',
@@ -982,32 +921,6 @@ const styles = StyleSheet.create({
     container: {
         flex: 1,
         backgroundColor: '#F9FAFB',
-    },
-    centered: {
-        justifyContent: 'center',
-        alignItems: 'center',
-        padding: 20,
-    },
-    loadingText: {
-        marginTop: 12,
-        fontSize: 14,
-        color: '#6B7280',
-    },
-    errorText: {
-        fontSize: 16,
-        color: '#EF4444',
-        marginTop: 12,
-        marginBottom: 16,
-    },
-    errorButton: {
-        backgroundColor: '#3B82F6',
-        paddingHorizontal: 24,
-        paddingVertical: 12,
-        borderRadius: 12,
-    },
-    errorButtonText: {
-        color: '#FFFFFF',
-        fontWeight: '600',
     },
     headerContainer: {
         backgroundColor: '#F9FAFB',
@@ -1072,6 +985,11 @@ const styles = StyleSheet.create({
         fontWeight: '700',
         color: '#1F2937',
     },
+    sectionEditText: {
+        fontSize: 13,
+        color: '#3B82F6',
+        fontWeight: '500',
+    },
     inputContainer: {
         marginBottom: 16,
     },
@@ -1106,7 +1024,12 @@ const styles = StyleSheet.create({
     },
     textArea: {
         minHeight: 80,
-        textAlignVertical: 'top',
+    },
+    inputRightElement: {
+        position: 'absolute',
+        right: 14,
+        fontSize: 14,
+        color: '#6B7280',
     },
     dropdownContainer: {
         flex: 1,
@@ -1152,6 +1075,11 @@ const styles = StyleSheet.create({
         fontSize: 12,
         color: '#6B7280',
         marginTop: 2,
+    },
+    divider: {
+        height: 1,
+        backgroundColor: '#F3F4F6',
+        marginVertical: 16,
     },
     previewContainer: {
         flexDirection: 'row',
@@ -1370,6 +1298,42 @@ const styles = StyleSheet.create({
         color: '#3B82F6',
         fontWeight: '500',
     },
+    aiInsightCard: {
+        marginHorizontal: 16,
+        marginBottom: 16,
+        borderRadius: 20,
+        overflow: 'hidden',
+    },
+    aiInsightGradient: {
+        padding: 20,
+    },
+    aiInsightContent: {
+        flexDirection: 'row',
+        alignItems: 'center',
+    },
+    aiInsightIcon: {
+        width: 48,
+        height: 48,
+        borderRadius: 24,
+        backgroundColor: 'rgba(255,255,255,0.2)',
+        justifyContent: 'center',
+        alignItems: 'center',
+        marginRight: 16,
+    },
+    aiInsightText: {
+        flex: 1,
+    },
+    aiInsightTitle: {
+        fontSize: 14,
+        fontWeight: '700',
+        color: '#FFFFFF',
+        marginBottom: 4,
+    },
+    aiInsightMessage: {
+        fontSize: 12,
+        color: 'rgba(255,255,255,0.9)',
+        lineHeight: 18,
+    },
     bottomActionBar: {
         position: 'absolute',
         bottom: 0,
@@ -1412,6 +1376,18 @@ const styles = StyleSheet.create({
         fontSize: 14,
         fontWeight: '600',
         color: '#374151',
+    },
+    tertiaryButton: {
+        flex: 1,
+        backgroundColor: '#EFF6FF',
+        paddingVertical: 14,
+        borderRadius: 30,
+        alignItems: 'center',
+    },
+    tertiaryButtonText: {
+        fontSize: 14,
+        fontWeight: '600',
+        color: '#3B82F6',
     },
     modalOverlay: {
         position: 'absolute',
